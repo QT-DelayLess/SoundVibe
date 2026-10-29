@@ -4,6 +4,7 @@
         Title="SoundVibe" Height="750" Width="1100"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         WindowStartupLocation="CenterScreen"
+        AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
         Icon="app_icon.ico">
 
     <Window.Resources>
@@ -415,10 +416,30 @@
                                     </RadioButton>
                                     <Button x:Name="BtnAddFolder" Content="📁 Add Folder"
                                             Style="{StaticResource IconButton}"
-                                            Margin="20,15,20,10" Height="40" Background="{DynamicResource ThemeGlassBrush}"/>
+                                            Margin="20,15,20,8" Height="40" Background="{DynamicResource ThemeGlassBrush}"/>
 
-                                    <TextBlock Text="PLAYLIST" Foreground="#607D8B"
-                                               FontSize="10" FontWeight="Bold" Margin="30,15,0,5"/>
+                                    <Grid Margin="20,0,20,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="32"/>
+                                            <ColumnDefinition Width="32"/>
+                                        </Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="CmbLibraryView" Grid.Column="0" Height="34"
+                                                  Style="{StaticResource GlassComboBoxStyle}"
+                                                  ItemContainerStyle="{StaticResource GlassComboBoxItemStyle}"
+                                                  ToolTip="Library / Favorites / Recently Played / Custom Playlists"/>
+                                        <Button x:Name="BtnNewPlaylist" Grid.Column="1" Content="＋" Width="28" Height="28"
+                                                Style="{StaticResource IconButton}" ToolTip="New playlist" Margin="4,3,0,3"/>
+                                        <Button x:Name="BtnAddToPlaylist" Grid.Column="2" Content="♫+" Width="28" Height="28"
+                                                FontSize="10" Style="{StaticResource IconButton}" ToolTip="Add selected song to playlist" Margin="4,3,0,3"/>
+                                    </Grid>
+
+                                    <Button x:Name="BtnResumeLast" Content="↻ Resume last session" Visibility="Collapsed"
+                                            Style="{StaticResource IconButton}" Margin="20,0,20,6" Height="32"
+                                            Background="#12FFFFFF" FontSize="11"/>
+
+                                    <TextBlock Text="TRACKS" Foreground="#607D8B"
+                                               FontSize="10" FontWeight="Bold" Margin="30,8,0,5"/>
                                 </StackPanel>
 
                                 <ListBox x:Name="LstSongs" Grid.Row="1" Background="Transparent"
@@ -462,6 +483,9 @@
                                                     <ContextMenu Background="{DynamicResource ThemeDarkBgBrush}" Foreground="White" BorderBrush="#30FFFFFF">
                                                         <MenuItem Header="▶ Sıradaki Çal (Play Next)" Click="MenuPlayNext_Click" Background="Transparent"/>
                                                         <MenuItem Header="🎵 Sıraya Ekle (Add to Queue)" Click="MenuAddQueue_Click" Background="Transparent"/>
+                                                        <Separator/>
+                                                        <MenuItem Header="★ Favori Aç/Kapat" Click="MenuToggleFavorite_Click" Background="Transparent"/>
+                                                        <MenuItem Header="＋ Aktif Playlist'e Ekle" Click="MenuAddToActivePlaylist_Click" Background="Transparent"/>
                                                     </ContextMenu>
                                                 </Grid.ContextMenu>
                                                 <Grid.ColumnDefinitions>
@@ -486,6 +510,20 @@
                                                                Opacity="0.7" Foreground="#B0C4DE"
                                                                TextTrimming="CharacterEllipsis"/>
                                                 </StackPanel>
+
+                                                <TextBlock Grid.Column="2" Text="★" Foreground="#FFD166" FontSize="12"
+                                                           VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,-2,0,0">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
 
                                                 <TextBlock x:Name="PlayIndicator" Grid.Column="2"
                                                            Foreground="{DynamicResource ThemeAccentBrush}" FontWeight="Bold" FontSize="14"
@@ -586,9 +624,19 @@
                             <TextBox x:Name="TxtSearch" Width="280" Height="36"
                                      HorizontalAlignment="Left" Style="{StaticResource SearchBoxStyle}"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <ComboBox x:Name="CmbRenderMode" Width="86" Height="36" SelectedIndex="2"
+                                          Style="{StaticResource GlassComboBoxStyle}"
+                                          ItemContainerStyle="{StaticResource GlassComboBoxItemStyle}"
+                                          Margin="0,0,10,0" ToolTip="Visualizer refresh rate">
+                                    <ComboBoxItem Content="Off"/>
+                                    <ComboBoxItem Content="30 FPS"/>
+                                    <ComboBoxItem Content="60 FPS"/>
+                                </ComboBox>
                                 <Button x:Name="BtnTheme" Content="🌃 Neon Dream" Width="120" Height="36"
-                                        Style="{StaticResource IconButton}" Margin="0,0,15,0"
+                                        Style="{StaticResource IconButton}" Margin="0,0,10,0"
                                         Background="{DynamicResource ThemeGlassBrush}"/>
+                                <Button x:Name="BtnTray" Content="▾" Width="36" Height="36"
+                                        Style="{StaticResource IconButton}" Margin="0,0,5,0" ToolTip="Hide to tray"/>
                                 <Button x:Name="BtnMainToMini" Content="🗗" Width="36" Height="36"
                                         Style="{StaticResource IconButton}" Margin="0,0,5,0"/>
                                 <Button x:Name="BtnMinimize" Content="—" Width="36" Height="36"
@@ -626,6 +674,11 @@
                                     <ComboBoxItem Content="10. Hyperspace Tunnel"/>
                                     <ComboBoxItem Content="11. Particle Reactor"/>
                                     <ComboBoxItem Content="12. Classic CRT"/>
+                                    <ComboBoxItem Content="13. Synthwave Horizon"/>
+                                    <ComboBoxItem Content="14. Aero Aurora"/>
+                                    <ComboBoxItem Content="15. Pulse Rings"/>
+                                    <ComboBoxItem Content="16. Neon DNA"/>
+                                    <ComboBoxItem Content="17. Spectrum Mountains"/>
                                     <ComboBoxItem Content="-- Karaoke Mode --"/>
                                 </ComboBox>
 
@@ -787,8 +840,8 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
 
-                                <Border Grid.Column="0" Background="{DynamicResource ThemeGlassBrush}" CornerRadius="10"
-                                        Margin="0,0,10,0" Padding="15,0">
+                                <Border x:Name="QueueCard" Grid.Column="0" Background="{DynamicResource ThemeGlassBrush}" CornerRadius="10"
+                                        Margin="0,0,10,0" Padding="15,0" Cursor="Hand" ToolTip="Open queue">
                                     <Grid>
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                             <TextBlock Text="🎵" Foreground="#90A4AE" FontSize="14" Margin="0,0,10,0"/>
@@ -806,16 +859,22 @@
 
                                 <Border Grid.Column="1" Background="{DynamicResource ThemeGlassBrush}" CornerRadius="10"
                                         Margin="5,0,5,0" Padding="15,0">
-                                    <StackPanel VerticalAlignment="Center">
-                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,3">
+                                    <Grid VerticalAlignment="Center">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,3">
                                             <TextBlock Text="❝" Foreground="{DynamicResource ThemeAccentBrush}" FontSize="12" Margin="0,0,5,0"/>
-                                            <TextBlock Text="LYRICS" Foreground="#B0C4DE"
-                                                       FontSize="10" FontWeight="Bold"/>
+                                            <TextBlock Text="LYRICS" Foreground="#B0C4DE" FontSize="10" FontWeight="Bold"/>
+                                            <Button x:Name="BtnLyricMinus" Content="−" Width="20" Height="18" Margin="10,0,2,0" Style="{StaticResource IconButton}" ToolTip="Lyrics -100 ms"/>
+                                            <TextBlock x:Name="TxtLyricOffset" Text="+200ms" Foreground="#607D8B" FontSize="9" VerticalAlignment="Center"/>
+                                            <Button x:Name="BtnLyricPlus" Content="＋" Width="20" Height="18" Margin="2,0,0,0" Style="{StaticResource IconButton}" ToolTip="Lyrics +100 ms"/>
                                         </StackPanel>
-                                        <TextBlock x:Name="TxtWidgetLyrics" Text="♪ Lirik Bulunamadı ♪"
+                                        <TextBlock Grid.Row="1" x:Name="TxtWidgetLyrics" Text="♪ Lirik Bulunamadı ♪"
                                                    Foreground="{DynamicResource ThemeAccentBrush}" FontSize="13"
                                                    TextTrimming="CharacterEllipsis"/>
-                                    </StackPanel>
+                                    </Grid>
                                 </Border>
 
                                 <Border Grid.Column="2" Background="{DynamicResource ThemeGlassBrush}" CornerRadius="10"
@@ -841,6 +900,53 @@
                                 </Border>
                             </Grid>
                         </Grid>
+
+                        <Popup x:Name="QueuePopup" Placement="Center" PlacementTarget="{Binding ElementName=PlayerViewPanel}"
+                               StaysOpen="False" AllowsTransparency="True">
+                            <Border Width="420" MaxHeight="480" CornerRadius="16" Padding="16"
+                                    Background="#F0141418" BorderBrush="#35FFFFFF" BorderThickness="1">
+                                <Border.Effect>
+                                    <DropShadowEffect BlurRadius="28" ShadowDepth="0" Color="Black" Opacity="0.75"/>
+                                </Border.Effect>
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid Margin="2,0,2,10">
+                                        <TextBlock Text="Up Next" Foreground="White" FontSize="18" FontWeight="Bold"/>
+                                        <Button x:Name="BtnClearQueue" Content="Clear" HorizontalAlignment="Right" Width="58" Height="28"
+                                                Style="{StaticResource IconButton}" Background="#15FFFFFF"/>
+                                    </Grid>
+                                    <ListBox x:Name="LstQueue" Grid.Row="1" Background="Transparent" BorderThickness="0"
+                                             MaxHeight="360" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="4,5">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="42"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="32"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="34" Height="34" CornerRadius="6" Background="#1C1C1E" ClipToBounds="True">
+                                                        <Image Source="{Binding CoverImage}" Stretch="UniformToFill"/>
+                                                    </Border>
+                                                    <StackPanel Grid.Column="1" Margin="8,0" VerticalAlignment="Center">
+                                                        <TextBlock Text="{Binding Title}" Foreground="White" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                        <TextBlock Text="{Binding Artist}" Foreground="#90A4AE" FontSize="10" TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                    <Button Grid.Column="2" Content="✕" Width="26" Height="26" Style="{StaticResource IconButton}"
+                                                            Click="QueueRemove_Click" ToolTip="Remove"/>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+                                    <TextBlock Grid.Row="2" Text="Tip: Right-click a track → Play Next / Add to Queue"
+                                               Foreground="#607D8B" FontSize="10" Margin="2,10,2,0"/>
+                                </Grid>
+                            </Border>
+                        </Popup>
 
                         <Grid x:Name="EqViewPanel" Grid.Row="1" Visibility="Collapsed" Margin="40,20,40,40">
                             <Border Background="{DynamicResource ThemeGlassBrush}" BorderBrush="#15FFFFFF" BorderThickness="1"

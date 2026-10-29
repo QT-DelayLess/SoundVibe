@@ -16,6 +16,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
+using System.Windows.Threading;
 using TagLib;
 
 // --- ÇAKIŞMA ÖNLEYİCİ ALIAS'LAR ---
@@ -242,8 +243,7 @@ namespace SoundVibe
 
                 double baseY = height - intensity;
                 double w = Math.Max(2.0, bw - 2.0);
-                int segments = (int)(intensity / 10);
-                if (segments < 1) segments = 1;
+                int segments = Math.Max(1, Math.Min(10, (int)(intensity / 10)));
 
                 double segHeight = intensity / segments;
                 for (int s = 0; s < segments; s++)
@@ -450,6 +450,215 @@ namespace SoundVibe
                 dc.DrawRectangle(_crtScanlineBrush, null, new Rect(0, y, width, 2));
         }
 
+
+        // 13. Synthwave Horizon — spectrum skyline + lightweight perspective grid.
+        public void DrawSynthwaveHorizon(float[] data, double width, double height, Brush brush, Pen pen, double bass)
+        {
+            using var dc = _visual.RenderOpen();
+            double horizon = height * 0.68;
+            double cx = width / 2.0;
+
+            // Perspective grid: intentionally sparse so it stays cheap at 60 FPS.
+            dc.PushOpacity(0.22);
+            for (int i = -7; i <= 7; i++)
+            {
+                double topX = cx + i * (width / 28.0);
+                double bottomX = cx + i * (width / 8.0);
+                dc.DrawLine(pen, new Point(topX, horizon), new Point(bottomX, height));
+            }
+
+            for (int row = 1; row <= 5; row++)
+            {
+                double t = row / 5.0;
+                double eased = t * t;
+                double y = horizon + (height - horizon) * eased;
+                dc.DrawLine(pen, new Point(0, y), new Point(width, y));
+            }
+            dc.Pop();
+
+            // Bass-reactive "sun" kept behind the skyline.
+            double sunRadius = Math.Min(width, height) * 0.12 + Math.Sqrt(Math.Max(0, bass)) * 12.0;
+            dc.PushOpacity(0.18);
+            dc.DrawEllipse(brush, null, new Point(cx, horizon - 18), sunRadius, sunRadius);
+            dc.Pop();
+
+            int count = Math.Min(48, data.Length);
+            if (count <= 0) return;
+            double bw = width / count;
+            for (int i = 0; i < count; i++)
+            {
+                int src = (int)((i / (double)Math.Max(1, count - 1)) * (data.Length - 1));
+                double intensity = Math.Sqrt(Math.Max(0, data[src])) * 230.0;
+                intensity = Math.Min(horizon * 0.78, Math.Max(3.0, intensity));
+                double x = i * bw + 0.7;
+                double w = Math.Max(1.5, bw - 1.4);
+                dc.DrawRectangle(brush, null, new Rect(x, horizon - intensity, w, intensity));
+            }
+
+            dc.PushOpacity(0.55);
+            dc.DrawLine(pen, new Point(0, horizon), new Point(width, horizon));
+            dc.Pop();
+        }
+
+        // 14. Aero Aurora — two soft FFT ribbons; Frutiger/Aero themed but still low-cost.
+        public void DrawAeroAurora(float[] data, double width, double height, Brush brush, Pen pen, double bass, double phase)
+        {
+            using var dc = _visual.RenderOpen();
+            int points = Math.Min(32, data.Length);
+            if (points < 2) return;
+
+            for (int layer = 0; layer < 2; layer++)
+            {
+                double center = height * (layer == 0 ? 0.48 : 0.58);
+                double ampMul = layer == 0 ? 150.0 : 105.0;
+                double phaseShift = phase * (layer == 0 ? 1.0 : -0.72) + layer * 1.35;
+
+                var geo = new StreamGeometry();
+                using (var ctx = geo.Open())
+                {
+                    ctx.BeginFigure(new Point(0, center), true, true);
+                    for (int i = 0; i < points; i++)
+                    {
+                        int src = (int)((i / (double)(points - 1)) * (data.Length - 1));
+                        double x = i * (width / (points - 1.0));
+                        double energy = Math.Sqrt(Math.Max(0, data[src])) * ampMul;
+                        double drift = Math.Sin(i * 0.48 + phaseShift) * (8.0 + Math.Sqrt(Math.Max(0, bass)) * 8.0);
+                        double y = Math.Max(4, Math.Min(height - 4, center - energy + drift));
+                        ctx.LineTo(new Point(x, y), true, false);
+                    }
+                    ctx.LineTo(new Point(width, center + 28), true, false);
+                    ctx.LineTo(new Point(0, center + 28), true, false);
+                }
+                geo.Freeze();
+
+                dc.PushOpacity(layer == 0 ? 0.18 : 0.10);
+                dc.DrawGeometry(brush, null, geo);
+                dc.Pop();
+
+                dc.PushOpacity(layer == 0 ? 0.85 : 0.42);
+                dc.DrawGeometry(null, pen, geo);
+                dc.Pop();
+            }
+        }
+
+        // 15. Pulse Rings — ultra-light concentric energy rings.
+        public void DrawPulseRings(float[] data, double width, double height, Pen pen, double bass, double rotationAngle)
+        {
+            using var dc = _visual.RenderOpen();
+            double cx = width / 2.0;
+            double cy = height / 2.0;
+            double maxR = Math.Max(18.0, Math.Min(width, height) * 0.46);
+            int rings = 8;
+
+            for (int r = 0; r < rings; r++)
+            {
+                int start = r * data.Length / rings;
+                int end = Math.Max(start + 1, (r + 1) * data.Length / rings);
+                end = Math.Min(end, data.Length);
+
+                double sum = 0;
+                for (int i = start; i < end; i++)
+                    sum += Math.Max(0, data[i]);
+                double avg = sum / Math.Max(1, end - start);
+
+                double baseR = maxR * ((r + 1.0) / rings);
+                double pulse = Math.Sqrt(avg) * 34.0 + (r < 2 ? Math.Sqrt(Math.Max(0, bass)) * 6.0 : 0.0);
+                double wobble = Math.Sin(rotationAngle * 2.0 + r * 0.9) * 2.5;
+                double radius = Math.Max(4.0, baseR + pulse + wobble);
+
+                dc.PushOpacity(0.18 + (r + 1.0) / rings * 0.72);
+                dc.DrawEllipse(null, pen, new Point(cx, cy), radius, radius);
+                dc.Pop();
+            }
+
+            // Small core pulse gives the rings a focal point without particles.
+            dc.PushOpacity(0.28);
+            double core = 8.0 + Math.Sqrt(Math.Max(0, bass)) * 18.0;
+            dc.DrawEllipse(pen.Brush, null, new Point(cx, cy), core, core);
+            dc.Pop();
+        }
+
+        // 16. Neon DNA — dual helix driven by frequency energy.
+        public void DrawNeonDna(float[] data, double width, double height, Pen pen, double phase)
+        {
+            using var dc = _visual.RenderOpen();
+            int points = Math.Min(36, data.Length);
+            if (points < 2) return;
+
+            double cy = height / 2.0;
+            double step = width / (points - 1.0);
+            Point prevA = new Point(0, cy);
+            Point prevB = new Point(0, cy);
+
+            for (int i = 0; i < points; i++)
+            {
+                int src = (int)((i / (double)(points - 1)) * (data.Length - 1));
+                double energy = Math.Sqrt(Math.Max(0, data[src]));
+                double amp = Math.Min(height * 0.42, 14.0 + energy * 105.0);
+                double angle = i * 0.62 + phase * 2.1;
+                double x = i * step;
+                double offset = Math.Sin(angle) * amp;
+
+                Point a = new Point(x, cy + offset);
+                Point b = new Point(x, cy - offset);
+
+                if (i > 0)
+                {
+                    dc.DrawLine(pen, prevA, a);
+                    dc.DrawLine(pen, prevB, b);
+                }
+
+                if ((i & 1) == 0)
+                {
+                    dc.PushOpacity(0.25 + Math.Min(0.45, energy * 0.9));
+                    dc.DrawLine(pen, a, b);
+                    dc.Pop();
+                }
+
+                prevA = a;
+                prevB = b;
+            }
+        }
+
+        // 17. Spectrum Mountains — a few FFT-history ridges instead of expensive full-depth trails.
+        public void DrawSpectrumMountains(float[] data, double width, double height, Pen pen)
+        {
+            Array.Copy(data, _fftHistory[_historyIndex], Math.Min(data.Length, 64));
+            using var dc = _visual.RenderOpen();
+
+            const int trails = 5;
+            int count = Math.Min(32, data.Length);
+            if (count < 2) return;
+
+            for (int trail = trails - 1; trail >= 0; trail--)
+            {
+                int hIdx = (_historyIndex - trail + HISTORY_DEPTH) % HISTORY_DEPTH;
+                float[] past = _fftHistory[hIdx];
+                double baseline = height * 0.88 - trail * 9.0;
+
+                var geo = new StreamGeometry();
+                using (var ctx = geo.Open())
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        int src = (int)((i / (double)(count - 1)) * (data.Length - 1));
+                        double x = i * (width / (count - 1.0));
+                        double y = baseline - Math.Sqrt(Math.Max(0, past[src])) * 210.0;
+                        y = Math.Max(2.0, Math.Min(height - 2.0, y));
+                        if (i == 0) ctx.BeginFigure(new Point(x, y), false, false);
+                        else ctx.LineTo(new Point(x, y), true, false);
+                    }
+                }
+                geo.Freeze();
+
+                dc.PushOpacity(0.20 + (trails - trail) * 0.14);
+                dc.DrawGeometry(null, pen, geo);
+                dc.Pop();
+            }
+
+            _historyIndex = (_historyIndex + 1) % HISTORY_DEPTH;
+        }
+
         public void DrawMiniBars(float[] data, double width, double height, Brush brush)
         {
             int count = data.Length;
@@ -480,12 +689,43 @@ namespace SoundVibe
         private Stopwatch _uiTimer = new Stopwatch();
         private bool _isRendering = false;
         private double _lastFrameDelta = 1.0 / 60.0;
+        private int _renderFps = 60;
+        private bool _isClosing = false;
 
-        private string _lastFolderPath = ""; // YENİ: Klasör kaydetmek için değişken
+        private readonly float[] _fftScratch = new float[1024];
+        private readonly float[] _miniFft = new float[32];
+        private readonly float[] _logFft = new float[64];
+        private readonly DispatcherTimer _playbackUiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        private readonly DispatcherTimer _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(160) };
+        private FileSystemWatcher? _libraryWatcher;
+        private CancellationTokenSource? _libraryLoadCts;
+        private System.Windows.Forms.NotifyIcon? _trayIcon;
+        private HwndSource? _hwndSource;
+
+        private readonly ObservableCollection<string> _libraryViews = new ObservableCollection<string>();
+        private SoundVibeState _state = new SoundVibeState();
+        private Dictionary<string, LibraryCacheEntry> _libraryCache = new Dictionary<string, LibraryCacheEntry>(StringComparer.OrdinalIgnoreCase);
+        private string _activeLibraryView = "All Songs";
+        private string _pendingSearch = "";
+        private string _resumePath = "";
+        private double _resumeSeconds = 0;
+
+        private static readonly HashSet<string> AudioExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aiff", ".aac" };
+
+        private static readonly string AppDataRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SoundVibe");
+        private static readonly string ConfigPath = Path.Combine(AppDataRoot, "SoundVibe_Config.json");
+        private static readonly string StatePath = Path.Combine(AppDataRoot, "SoundVibe_State.json");
+        private static readonly string CachePath = Path.Combine(AppDataRoot, "SoundVibe_LibraryCache.json");
+
+        private string _lastFolderPath = "";
 
         private const int NUM_BARS = 64;
         private const int MINI_BARS = 32;
+        private const int KARAOKE_VISUALIZER_INDEX = 17;
         private float[] smoothedFft = new float[NUM_BARS];
+        private double _visualPhase = 0.0;
 
         private VisualizerHost? _mainVisHost;
         private VisualizerHost? _miniVisHost;
@@ -524,20 +764,39 @@ namespace SoundVibe
         {
             InitializeComponent();
             RenderOptions.ProcessRenderMode = RenderMode.Default;
+            Directory.CreateDirectory(AppDataRoot);
 
             LstSongs.ItemsSource = Playlist;
+            LstQueue.ItemsSource = PlaybackManager.Instance.UserQueue;
+            CmbLibraryView.ItemsSource = _libraryViews;
 
-            this.Loaded += (s, e) =>
+            _playbackUiTimer.Tick += (s, e) => UpdatePlaybackUi();
+            _searchDebounceTimer.Tick += (s, e) =>
+            {
+                _searchDebounceTimer.Stop();
+                ApplyLibraryFilter();
+            };
+
+            SourceInitialized += (s, e) =>
+            {
+                _hwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+                _hwndSource?.AddHook(WndProc);
+            };
+
+            this.Loaded += async (s, e) =>
             {
                 CacheUiRefs();
                 _bgAmbientGlow = this.FindName("BgAmbientGlow") as Image;
                 WindowsServices.EnableAcrylicBlur(this);
+                LoadPersistentState();
+                LoadLibraryCache();
+                RefreshLibraryViews();
                 ApplyTheme(0);
                 SetupVisualizer();
                 SetupShuffleRepeatButtons();
                 SetupEqualizer();
-
-                LoadSettings();
+                SetupTrayIcon();
+                await LoadSettingsAsync();
             };
 
             this.StateChanged += (s, e) =>
@@ -548,21 +807,41 @@ namespace SoundVibe
 
             this.Closing += (s, e) =>
             {
+                _isClosing = true;
                 SaveSettings();
+                SavePersistentState();
+                SaveLibraryCache();
+                _searchDebounceTimer.Stop();
                 StopRendering();
+                DisposeLibraryWatcher();
+                _hwndSource?.RemoveHook(WndProc);
+                _trayIcon?.Dispose();
+                _libraryLoadCts?.Cancel();
+                _libraryLoadCts?.Dispose();
                 AudioEngine.Instance.Dispose();
             };
 
             AudioEngine.Instance.TrackEnded += (s, e) =>
                 Dispatcher.Invoke(() => { if (PlaybackManager.Instance.GoToNext()) PlayCurrentSong(); });
 
-            if (BtnTheme != null) BtnTheme.Click += BtnTheme_Click;
+            PlaybackManager.Instance.UserQueue.CollectionChanged += (s, e) => UpdateQueueCount();
+
+            BtnTheme.Click += BtnTheme_Click;
             BtnClose.Click += BtnClose_Click;
             BtnMinimize.Click += BtnMinimize_Click;
             BtnMainToMini.Click += ToggleMiniPlayer;
             BtnAddFolder.Click += BtnAddFolder_Click;
+            BtnTray.Click += (s, e) => HideToTray();
+            BtnNewPlaylist.Click += BtnNewPlaylist_Click;
+            BtnAddToPlaylist.Click += BtnAddToPlaylist_Click;
+            BtnResumeLast.Click += BtnResumeLast_Click;
+            BtnClearQueue.Click += (s, e) => PlaybackManager.Instance.ClearUserQueue();
+            QueueCard.MouseLeftButtonUp += (s, e) => QueuePopup.IsOpen = !QueuePopup.IsOpen;
+            CmbLibraryView.SelectionChanged += CmbLibraryView_SelectionChanged;
+            CmbRenderMode.SelectionChanged += CmbRenderMode_SelectionChanged;
+            BtnLyricMinus.Click += (s, e) => ChangeLyricOffset(-100);
+            BtnLyricPlus.Click += (s, e) => ChangeLyricOffset(100);
 
-            // DİNAMİK BUTON BAĞLAMALARI (Olası x:Name kopmalarına karşı korumalı)
             if (this.FindName("BtnPlayPause") is Button btnPlay) btnPlay.Click += BtnPlayPause_Click;
             if (this.FindName("BtnPrev") is Button btnPrev) btnPrev.Click += BtnPrev_Click;
             if (this.FindName("BtnNext") is Button btnNext) btnNext.Click += BtnNext_Click;
@@ -579,83 +858,109 @@ namespace SoundVibe
             BindSlider(SldTimeline, () => SldTimeline.Value);
             BindSlider(SldMiniTimeline, () => SldMiniTimeline.Value);
 
-            if (CmbVisualizerMode != null)
-                CmbVisualizerMode.SelectionChanged += (s, e) => SetupVisualizer();
-            if (VisualizerCanvas != null)
-                VisualizerCanvas.SizeChanged += (s, e) => SetupVisualizer();
-            if (MiniVisualizerCanvas != null)
-                MiniVisualizerCanvas.SizeChanged += (s, e) => SetupVisualizer();
-            if (TxtSearch != null)
-                TxtSearch.TextChanged += TxtSearch_TextChanged;
+            CmbVisualizerMode.SelectionChanged += (s, e) => SetupVisualizer();
+            VisualizerCanvas.SizeChanged += (s, e) => ResizeVisualizerHosts();
+            MiniVisualizerCanvas.SizeChanged += (s, e) => ResizeVisualizerHosts();
+            TxtSearch.TextChanged += TxtSearch_TextChanged;
 
             var tabLibrary = this.FindName("TabLibrary") as RadioButton;
             var tabEq = this.FindName("TabEqualizer") as RadioButton;
             var playerPanel = this.FindName("PlayerViewPanel") as Grid;
             var eqPanel = this.FindName("EqViewPanel") as Grid;
 
-            if (tabLibrary != null) tabLibrary.Checked += (s, e) => {
+            if (tabLibrary != null) tabLibrary.Checked += (s, e) =>
+            {
                 if (playerPanel != null) playerPanel.Visibility = Visibility.Visible;
                 if (eqPanel != null) eqPanel.Visibility = Visibility.Collapsed;
             };
-            if (tabEq != null) tabEq.Checked += (s, e) => {
+            if (tabEq != null) tabEq.Checked += (s, e) =>
+            {
                 if (playerPanel != null) playerPanel.Visibility = Visibility.Collapsed;
                 if (eqPanel != null) eqPanel.Visibility = Visibility.Visible;
             };
         }
 
-        // --- GÜNCELLENEN: VERİ KAYDETME VE KLASÖR HATIRLAMA ---
         private void SaveSettings()
         {
             try
             {
-                var settings = new
+                Directory.CreateDirectory(AppDataRoot);
+                var current = PlaybackManager.Instance.CurrentSong;
+                var settings = new SoundVibeConfig
                 {
-                    Volume = SldVolume.Value,
+                    Volume = SldVolume?.Value ?? 50,
                     ThemeIndex = _currentTheme,
                     EqPresetIndex = FindVisualChildren<ComboBox>(this.FindName("EqViewPanel") as Grid).FirstOrDefault()?.SelectedIndex ?? 0,
-                    LastFolderPath = _lastFolderPath // YENİ EKLENDİ
+                    LastFolderPath = _lastFolderPath,
+                    RenderFps = _renderFps,
+                    LyricOffsetMs = LyricEngine.Instance.OffsetMilliseconds,
+                    LastSongPath = current?.FilePath ?? _resumePath,
+                    LastPositionSeconds = current != null ? AudioEngine.Instance.CurrentTime.TotalSeconds : _resumeSeconds,
+                    LastLibraryView = _activeLibraryView,
+                    VisualizerModeIndex = Math.Max(0, CmbVisualizerMode?.SelectedIndex ?? 0)
                 };
-                System.IO.File.WriteAllText("SoundVibe_Config.json", JsonSerializer.Serialize(settings));
+                System.IO.File.WriteAllText(ConfigPath, JsonSerializer.Serialize(settings, JsonOptions));
             }
             catch { }
         }
 
-        private async void LoadSettings()
+        private async Task LoadSettingsAsync()
         {
             try
             {
-                if (System.IO.File.Exists("SoundVibe_Config.json"))
-                {
-                    var json = System.IO.File.ReadAllText("SoundVibe_Config.json");
-                    using var doc = JsonDocument.Parse(json);
+                string legacyPath = Path.Combine(AppContext.BaseDirectory, "SoundVibe_Config.json");
+                string path = System.IO.File.Exists(ConfigPath) ? ConfigPath : legacyPath;
+                if (!System.IO.File.Exists(path)) return;
 
-                    if (doc.RootElement.TryGetProperty("Volume", out var v))
-                    {
-                        SldVolume.Value = v.GetDouble();
-                        AudioEngine.Instance.SetVolume((float)(SldVolume.Value / 100.0));
-                    }
-                    if (doc.RootElement.TryGetProperty("ThemeIndex", out var t))
-                    {
-                        _currentTheme = t.GetInt32();
-                        ApplyTheme(_currentTheme);
-                    }
-                    if (doc.RootElement.TryGetProperty("EqPresetIndex", out var eq))
-                    {
-                        var presetCombo = FindVisualChildren<ComboBox>(this.FindName("EqViewPanel") as Grid).FirstOrDefault();
-                        if (presetCombo != null) presetCombo.SelectedIndex = eq.GetInt32();
-                    }
-                    if (doc.RootElement.TryGetProperty("LastFolderPath", out var folderPath))
-                    {
-                        _lastFolderPath = folderPath.GetString() ?? "";
-                        if (!string.IsNullOrEmpty(_lastFolderPath) && System.IO.Directory.Exists(_lastFolderPath))
-                        {
-                            await LoadFolderAsync(_lastFolderPath);
-                        }
-                    }
+                var json = await Task.Run(() => System.IO.File.ReadAllText(path));
+                var settings = JsonSerializer.Deserialize<SoundVibeConfig>(json, JsonOptions);
+                if (settings == null) return;
+
+                SldVolume.Value = Math.Max(0, Math.Min(100, settings.Volume));
+                AudioEngine.Instance.SetVolume((float)(SldVolume.Value / 100.0));
+
+                _currentTheme = Math.Max(0, Math.Min(_themeDefs.Length - 1, settings.ThemeIndex));
+                ApplyTheme(_currentTheme);
+
+                var presetCombo = FindVisualChildren<ComboBox>(this.FindName("EqViewPanel") as Grid).FirstOrDefault();
+                if (presetCombo != null && settings.EqPresetIndex >= 0 && settings.EqPresetIndex < presetCombo.Items.Count)
+                    presetCombo.SelectedIndex = settings.EqPresetIndex;
+
+                _renderFps = settings.RenderFps == 0 || settings.RenderFps == 30 ? settings.RenderFps : 60;
+                CmbRenderMode.SelectedIndex = _renderFps == 0 ? 0 : _renderFps == 30 ? 1 : 2;
+
+                if (CmbVisualizerMode != null && CmbVisualizerMode.Items.Count > 0)
+                    CmbVisualizerMode.SelectedIndex = Math.Max(0, Math.Min(CmbVisualizerMode.Items.Count - 1, settings.VisualizerModeIndex));
+
+                LyricEngine.Instance.OffsetMilliseconds = Math.Max(-3000, Math.Min(3000, settings.LyricOffsetMs));
+                UpdateLyricOffsetLabel();
+
+                _resumePath = settings.LastSongPath ?? "";
+                _resumeSeconds = Math.Max(0, settings.LastPositionSeconds);
+                _lastFolderPath = settings.LastFolderPath ?? "";
+
+                if (!string.IsNullOrWhiteSpace(_lastFolderPath) && Directory.Exists(_lastFolderPath))
+                    await LoadFolderAsync(_lastFolderPath);
+
+                if (!string.IsNullOrWhiteSpace(settings.LastLibraryView) && _libraryViews.Contains(settings.LastLibraryView))
+                {
+                    _activeLibraryView = settings.LastLibraryView;
+                    CmbLibraryView.SelectedItem = _activeLibraryView;
                 }
+
+                UpdateResumeButton();
             }
             catch { }
+            finally
+            {
+            }
         }
+
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true
+        };
 
         // --- YENİ EKLENEN: OSD / TOAST BİLDİRİM METODU ---
         private void ShowToastNotification(SongModel song)
@@ -667,26 +972,81 @@ namespace SoundVibe
 
         private void StartRendering()
         {
+            if (!AudioEngine.Instance.IsPlaying) return;
+
+            if (!_playbackUiTimer.IsEnabled)
+                _playbackUiTimer.Start();
+
+            if (_renderFps <= 0 || WindowState == WindowState.Minimized || !IsVisible)
+                return;
+
             if (!_isRendering)
             {
                 CompositionTarget.Rendering += RenderLoop;
-                _renderTimer.Start();
-                _uiTimer.Start();
+                _renderTimer.Restart();
                 _isRendering = true;
             }
         }
 
         private void StopRendering()
         {
+            _playbackUiTimer.Stop();
             if (_isRendering)
             {
                 CompositionTarget.Rendering -= RenderLoop;
                 _renderTimer.Stop();
                 _renderTimer.Reset();
-                _uiTimer.Stop();
-                _uiTimer.Reset();
                 _isRendering = false;
             }
+        }
+
+        private void RestartVisualRenderingOnly()
+        {
+            if (_isRendering)
+            {
+                CompositionTarget.Rendering -= RenderLoop;
+                _renderTimer.Reset();
+                _isRendering = false;
+            }
+            if (AudioEngine.Instance.IsPlaying)
+                StartRendering();
+        }
+
+        private void UpdatePlaybackUi()
+        {
+            TimeSpan currentTime = AudioEngine.Instance.CurrentTime;
+            TimeSpan totalTime = AudioEngine.Instance.TotalTime;
+            double total = totalTime.TotalSeconds;
+            double current = currentTime.TotalSeconds;
+
+            if (!isUpdatingSlider)
+            {
+                if (isMiniPlayer && SldMiniTimeline != null)
+                {
+                    SldMiniTimeline.Maximum = Math.Max(1, total);
+                    SldMiniTimeline.Value = Math.Min(current, SldMiniTimeline.Maximum);
+                }
+                else if (SldTimeline != null)
+                {
+                    SldTimeline.Maximum = Math.Max(1, total);
+                    SldTimeline.Value = Math.Min(current, SldTimeline.Maximum);
+                }
+            }
+
+            if (_txtCurrentTime != null) _txtCurrentTime.Text = currentTime.ToString(@"mm\:ss");
+            if (_txtTotalTime != null) _txtTotalTime.Text = totalTime.ToString(@"mm\:ss");
+
+            string lyric = LyricEngine.Instance.GetCurrentLyric(currentTime);
+            if (_txtWidgetLyrics != null) _txtWidgetLyrics.Text = lyric;
+            if ((CmbVisualizerMode?.SelectedIndex ?? 0) == KARAOKE_VISUALIZER_INDEX && _txtBigKaraokeLyrics != null)
+                _txtBigKaraokeLyrics.Text = lyric;
+            UpdateQueueCount();
+        }
+
+        private void UpdateQueueCount()
+        {
+            if (_txtQueueCount != null)
+                _txtQueueCount.Text = PlaybackManager.Instance.QueueCount.ToString();
         }
 
         private static IEnumerable<T> FindVisualChildren<T>(DependencyObject? depObj) where T : DependencyObject
@@ -955,19 +1315,31 @@ namespace SoundVibe
             _miniVisCanvas?.Children.Clear();
 
             _mainVisHost = new VisualizerHost();
-            double w = _mainVisCanvas.ActualWidth > 0 ? _mainVisCanvas.ActualWidth : 700;
-            double h = _mainVisCanvas.ActualHeight > 0 ? _mainVisCanvas.ActualHeight : 150;
-            _mainVisHost.Width = w; _mainVisHost.Height = h;
-            _mainVisCanvas.Children.Add(_mainVisHost);
+            _miniVisHost = _miniVisCanvas != null ? new VisualizerHost() : null;
 
-            _mainVisHost.ResetHistory();
+            if (_mainVisHost != null)
+                _mainVisCanvas.Children.Add(_mainVisHost);
+            if (_miniVisHost != null && _miniVisCanvas != null)
+                _miniVisCanvas.Children.Add(_miniVisHost);
+
+            ResizeVisualizerHosts();
+            _mainVisHost?.ResetHistory();
+            _miniVisHost?.ResetHistory();
             ApplyThemeBrushesToHosts();
 
             int mode = CmbVisualizerMode.SelectedIndex;
-            if (_txtBigKaraokeLyrics != null) _txtBigKaraokeLyrics.Visibility = (mode == 12) ? Visibility.Visible : Visibility.Collapsed;
+            if (_txtBigKaraokeLyrics != null)
+                _txtBigKaraokeLyrics.Visibility = mode == KARAOKE_VISUALIZER_INDEX ? Visibility.Visible : Visibility.Collapsed;
 
-            bool needsOverflow = (mode == 4 || mode == 8 || mode == 9 || mode == 10);
+            bool needsOverflow = mode == 4 || mode == 8 || mode == 9 || mode == 10 || mode == 14;
             _mainVisCanvas.ClipToBounds = !needsOverflow;
+
+            // The built-in reflection works well for conventional bar/wave modes.
+            // Full-scene/circular visualizers already draw their own depth, so skip
+            // the duplicate VisualBrush render for them.
+            bool showReflection =
+                mode == 0 || mode == 1 || mode == 2 || mode == 3 ||
+                mode == 5 || mode == 6 || mode == 7 || mode == 11;
 
             if (_mainVisCanvas.Parent is Grid parentGrid)
             {
@@ -975,94 +1347,79 @@ namespace SoundVibe
                 {
                     if (child is Rectangle rect && rect.Fill is VisualBrush vb && vb.Visual == _mainVisCanvas)
                     {
-                        rect.Visibility = (mode == 4 || mode >= 8) ? Visibility.Collapsed : Visibility.Visible;
+                        rect.Visibility = showReflection ? Visibility.Visible : Visibility.Collapsed;
                         break;
                     }
                 }
             }
+        }
 
-            if (_miniVisCanvas != null)
+        private void ResizeVisualizerHosts()
+        {
+            if (_mainVisHost != null && _mainVisCanvas != null)
             {
-                _miniVisHost = new VisualizerHost();
-                double mw = _miniVisCanvas.ActualWidth > 0 ? _miniVisCanvas.ActualWidth : 520;
-                _miniVisHost.Width = mw;
+                _mainVisHost.Width = _mainVisCanvas.ActualWidth > 0 ? _mainVisCanvas.ActualWidth : 700;
+                _mainVisHost.Height = _mainVisCanvas.ActualHeight > 0 ? _mainVisCanvas.ActualHeight : 150;
+            }
+
+            if (_miniVisHost != null && _miniVisCanvas != null)
+            {
+                _miniVisHost.Width = _miniVisCanvas.ActualWidth > 0 ? _miniVisCanvas.ActualWidth : 520;
                 _miniVisHost.Height = _miniVisCanvas.ActualHeight > 0 ? _miniVisCanvas.ActualHeight : 80;
-                _miniVisCanvas.Children.Add(_miniVisHost);
             }
         }
 
         private void RenderLoop(object? sender, EventArgs e)
         {
-            if (_txtWidgetLyrics != null)
-                _txtWidgetLyrics.Text = LyricEngine.Instance.GetCurrentLyric(AudioEngine.Instance.CurrentTime);
+            if (!AudioEngine.Instance.IsPlaying || _renderFps <= 0) return;
 
-            if (_uiTimer.ElapsedMilliseconds > 250)
-            {
-                double total = AudioEngine.Instance.TotalTime.TotalSeconds;
-                double current = AudioEngine.Instance.CurrentTime.TotalSeconds;
-
-                if (!isUpdatingSlider)
-                {
-                    if (isMiniPlayer && SldMiniTimeline != null)
-                    {
-                        SldMiniTimeline.Maximum = total;
-                        SldMiniTimeline.Value = current;
-                    }
-                    else if (SldTimeline != null)
-                    {
-                        SldTimeline.Maximum = total;
-                        SldTimeline.Value = current;
-                    }
-                }
-
-                if (_txtCurrentTime != null) _txtCurrentTime.Text = AudioEngine.Instance.CurrentTime.ToString(@"mm\:ss");
-                if (_txtTotalTime != null) _txtTotalTime.Text = AudioEngine.Instance.TotalTime.ToString(@"mm\:ss");
-                if (_txtQueueCount != null) _txtQueueCount.Text = PlaybackManager.Instance.QueueCount.ToString();
-
-                _uiTimer.Restart();
-            }
-
-            if (!AudioEngine.Instance.IsPlaying) return;
-            if (_renderTimer.ElapsedMilliseconds < 16) return;
+            int frameMs = _renderFps <= 30 ? 33 : 16;
+            if (_renderTimer.ElapsedMilliseconds < frameMs) return;
 
             _lastFrameDelta = Math.Min(_renderTimer.ElapsedMilliseconds / 1000.0, 0.1);
             _renderTimer.Restart();
 
             if (!isMiniPlayer && _vinylRotation != null)
             {
-                _vinylRotation.Angle += 0.4;
-                if (_vinylRotation.Angle >= 360.0) _vinylRotation.Angle = 0.0;
+                _vinylRotation.Angle += _renderFps <= 30 ? 0.8 : 0.4;
+                if (_vinylRotation.Angle >= 360.0) _vinylRotation.Angle -= 360.0;
             }
 
-            float[] rawFft = AudioEngine.Instance.GetFftData();
-            if (rawFft == null || rawFft.Length == 0) return;
+            int copied = AudioEngine.Instance.CopyFftData(_fftScratch);
+            if (copied <= 0) return;
 
-            for (int i = 0; i < NUM_BARS && i < rawFft.Length; i++)
-                smoothedFft[i] += (rawFft[i] - smoothedFft[i]) * 0.28f;
+            BuildLogFrequencyBands(_fftScratch, copied, AudioEngine.Instance.SampleRate, _logFft);
+            for (int i = 0; i < NUM_BARS; i++)
+            {
+                // Faster attack, slower release: punchy transients without jitter.
+                float target = _logFft[i];
+                float factor = target > smoothedFft[i] ? 0.42f : 0.18f;
+                smoothedFft[i] += (target - smoothedFft[i]) * factor;
+            }
 
-            double bass = smoothedFft[0] + smoothedFft[1] + smoothedFft[2];
+            double bass = ComputeFrequencyEnergy(_fftScratch, copied, AudioEngine.Instance.SampleRate, 35, 180);
 
             if (_bgAmbientGlow != null)
             {
                 double baseOpacity = _themeDefs[_currentTheme].ambientOpacity;
-                _bgAmbientGlow.Opacity = Math.Min(1.0, baseOpacity + (bass * 0.15));
+                _bgAmbientGlow.Opacity = Math.Min(1.0, baseOpacity + (Math.Sqrt(Math.Max(0, bass)) * 0.22));
             }
 
             if (!isMiniPlayer && _playGlow != null)
             {
-                _playGlow.BlurRadius = Math.Min(50.0, 10.0 + Math.Sqrt(bass) * 38.0);
+                _playGlow.BlurRadius = Math.Min(50.0, 10.0 + Math.Sqrt(Math.Max(0, bass)) * 42.0);
                 double maxOpacity = (_currentTheme == 2 || _currentTheme == 3) ? 0.65 : 1.0;
-                _playGlow.Opacity = Math.Min(maxOpacity, 0.3 + Math.Sqrt(bass) * 0.58);
+                _playGlow.Opacity = Math.Min(maxOpacity, 0.3 + Math.Sqrt(Math.Max(0, bass)) * 0.62);
             }
 
-            _circularRotationAngle += 0.015;
+            _circularRotationAngle += _renderFps <= 30 ? 0.03 : 0.015;
             if (_circularRotationAngle > Math.PI * 2) _circularRotationAngle -= Math.PI * 2;
 
-            int visMode = CmbVisualizerMode?.SelectedIndex ?? 0;
-            if (visMode == 12 && !isMiniPlayer && _txtBigKaraokeLyrics != null)
-                _txtBigKaraokeLyrics.Text = LyricEngine.Instance.GetCurrentLyric(AudioEngine.Instance.CurrentTime);
+            _visualPhase += _lastFrameDelta * 1.35;
+            if (_visualPhase > Math.PI * 2048) _visualPhase -= Math.PI * 2048;
 
-            if (!isMiniPlayer && _mainVisHost != null && _mainVisCanvas != null && visMode != 12)
+            int visMode = CmbVisualizerMode?.SelectedIndex ?? 0;
+            if (!isMiniPlayer && _mainVisHost != null && _mainVisCanvas != null && visMode != KARAOKE_VISUALIZER_INDEX)
             {
                 double h = _mainVisCanvas.ActualHeight;
                 double w = _mainVisCanvas.ActualWidth;
@@ -1082,6 +1439,11 @@ namespace SoundVibe
                     case 9: _mainVisHost.DrawAudioTunnel(smoothedFft, w, h, _wavePen!, bass); break;
                     case 10: _mainVisHost.DrawParticleReactor(smoothedFft, w, h, _visBrush!, bass, _lastFrameDelta); break;
                     case 11: _mainVisHost.DrawampCRT(smoothedFft, w, h, _visBrush!); break;
+                    case 12: _mainVisHost.DrawSynthwaveHorizon(smoothedFft, w, h, _visBrush!, _wavePen!, bass); break;
+                    case 13: _mainVisHost.DrawAeroAurora(smoothedFft, w, h, _visBrush!, _wavePen!, bass, _visualPhase); break;
+                    case 14: _mainVisHost.DrawPulseRings(smoothedFft, w, h, _wavePen!, bass, _circularRotationAngle); break;
+                    case 15: _mainVisHost.DrawNeonDna(smoothedFft, w, h, _wavePen!, _visualPhase); break;
+                    case 16: _mainVisHost.DrawSpectrumMountains(smoothedFft, w, h, _wavePen!); break;
                 }
             }
             else if (isMiniPlayer && _miniVisHost != null && _miniVisCanvas != null)
@@ -1090,10 +1452,101 @@ namespace SoundVibe
                 double mw = _miniVisCanvas.ActualWidth;
                 if (mw < 1 || mh < 1) return;
 
-                var miniFft = new float[MINI_BARS];
-                for (int i = 0; i < MINI_BARS; i++) miniFft[i] = smoothedFft[i * 2];
-                _miniVisHost.DrawMiniBars(miniFft, mw, mh, _miniVisBrush!);
+                for (int i = 0; i < MINI_BARS; i++)
+                    _miniFft[i] = smoothedFft[i * 2];
+                _miniVisHost.DrawMiniBars(_miniFft, mw, mh, _miniVisBrush!);
             }
+        }
+
+        private static void BuildLogFrequencyBands(float[] fft, int fftCount, int sampleRate, float[] output)
+        {
+            Array.Clear(output, 0, output.Length);
+            if (fftCount <= 1 || sampleRate <= 0 || output.Length == 0) return;
+
+            // fftCount is half the FFT size (real spectrum). Derive the real bin width
+            // instead of hard-coding 1024 so this stays correct if FFT size changes.
+            double fftSize = fftCount * 2.0;
+            double binHz = sampleRate / fftSize;
+            if (binHz <= 0) return;
+
+            // With a 2048-point FFT the first useful bin is ~21.5 Hz @ 44.1 kHz.
+            // Starting below the actual resolution used to make several left-most bars
+            // read the exact same FFT bin, which produced the flat high plateau.
+            const double requestedMinHz = 20.0;
+            double minHz = Math.Max(requestedMinHz, binHz);
+            double maxHz = Math.Min(20000.0, sampleRate / 2.0);
+            if (maxHz <= minHz) return;
+
+            int minBin = Math.Max(1, (int)Math.Ceiling(minHz / binHz));
+            int maxBinExclusive = Math.Min(fftCount, (int)Math.Floor(maxHz / binHz) + 1);
+            if (maxBinExclusive <= minBin) return;
+
+            // Build strictly increasing band edges. This prevents multiple visual bars
+            // from pointing at the same low-frequency FFT bin. At low frequencies each
+            // bar gets at least one unique bin; higher bands naturally become wider.
+            int[] edges = new int[output.Length + 1];
+            edges[0] = minBin;
+            edges[output.Length] = maxBinExclusive;
+
+            double maxBinForCurve = Math.Max(minBin + 1.0, maxBinExclusive - 1.0);
+            for (int i = 1; i < output.Length; i++)
+            {
+                double t = i / (double)output.Length;
+                int desired = (int)Math.Round(minBin * Math.Pow(maxBinForCurve / minBin, t));
+
+                int minAllowed = edges[i - 1] + 1;
+                int maxAllowed = maxBinExclusive - (output.Length - i);
+                edges[i] = Math.Max(minAllowed, Math.Min(maxAllowed, desired));
+            }
+
+            for (int band = 0; band < output.Length; band++)
+            {
+                int start = edges[band];
+                int endExclusive = edges[band + 1];
+                if (start >= fftCount || endExclusive <= start) continue;
+
+                endExclusive = Math.Min(endExclusive, fftCount);
+                double sumSq = 0.0;
+                double peak = 0.0;
+                int n = 0;
+
+                for (int i = start; i < endExclusive; i++)
+                {
+                    double v = Math.Max(0.0, fft[i]);
+                    sumSq += v * v;
+                    if (v > peak) peak = v;
+                    n++;
+                }
+
+                if (n > 0)
+                {
+                    // RMS keeps wide high-frequency bands from being averaged into
+                    // nothing, while a small peak component preserves transients.
+                    double rms = Math.Sqrt(sumSq / n);
+                    output[band] = (float)(rms * 0.82 + peak * 0.18);
+                }
+            }
+        }
+
+        private static double ComputeFrequencyEnergy(float[] fft, int fftCount, int sampleRate, double minHz, double maxHz)
+        {
+            if (fftCount <= 1 || sampleRate <= 0) return 0;
+
+            double binHz = sampleRate / (fftCount * 2.0);
+            if (binHz <= 0) return 0;
+
+            int i0 = Math.Max(1, Math.Min(fftCount - 1, (int)Math.Ceiling(minHz / binHz)));
+            int i1 = Math.Max(i0, Math.Min(fftCount - 1, (int)Math.Floor(maxHz / binHz)));
+
+            double sumSq = 0.0;
+            int count = 0;
+            for (int i = i0; i <= i1; i++)
+            {
+                double v = Math.Max(0.0, fft[i]);
+                sumSq += v * v;
+                count++;
+            }
+            return count > 0 ? Math.Sqrt(sumSq / count) : 0.0;
         }
 
         private void SetFakeAmbientGlow(Color dominant)
@@ -1128,8 +1581,8 @@ namespace SoundVibe
             var src = e.OriginalSource as DependencyObject;
             while (src != null)
             {
-                if (src is Button || src is ListBox || src is ListBoxItem ||
-                    src is Slider || src is ScrollViewer || src is TextBox ||
+                if (ReferenceEquals(src, QueueCard) || src is Button || src is ListBox || src is ListBoxItem ||
+                    src is Slider || src is ScrollViewer || src is TextBox || src is ComboBox ||
                     src is System.Windows.Controls.Primitives.Thumb ||
                     src is System.Windows.Controls.Primitives.RepeatButton)
                     return;
@@ -1144,13 +1597,162 @@ namespace SoundVibe
 
         private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e)
         {
-            string q = TxtSearch.Text.ToLower();
+            _pendingSearch = TxtSearch.Text?.Trim() ?? "";
+            _searchDebounceTimer.Stop();
+            _searchDebounceTimer.Start();
+        }
+
+        private void ApplyLibraryFilter()
+        {
             ICollectionView view = CollectionViewSource.GetDefaultView(Playlist);
-            view.Filter = item => {
-                if (string.IsNullOrWhiteSpace(q)) return true;
-                if (item is SongModel s) return s.Title.ToLower().Contains(q) || s.Artist.ToLower().Contains(q);
-                return false;
+            string query = _pendingSearch;
+            string active = _activeLibraryView;
+
+            view.SortDescriptions.Clear();
+            if (active == "Recently Played")
+                view.SortDescriptions.Add(new SortDescription(nameof(SongModel.LastPlayedUtc), ListSortDirection.Descending));
+            else if (active == "Most Played")
+                view.SortDescriptions.Add(new SortDescription(nameof(SongModel.PlayCount), ListSortDirection.Descending));
+
+            view.Filter = item =>
+            {
+                if (item is not SongModel song) return false;
+
+                if (!string.IsNullOrWhiteSpace(query) &&
+                    song.Title.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    song.Artist.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+
+                if (active == "Favorites") return song.IsFavorite;
+                if (active == "Recently Played") return song.LastPlayedUtc.HasValue;
+                if (active == "Most Played") return song.PlayCount > 0;
+                if (active != "All Songs")
+                {
+                    return _state.Playlists.TryGetValue(active, out var paths) &&
+                           paths.Any(p => string.Equals(p, song.FilePath, StringComparison.OrdinalIgnoreCase));
+                }
+                return true;
             };
+            view.Refresh();
+        }
+
+        private void RefreshLibraryViews()
+        {
+            string desired = _activeLibraryView;
+            _libraryViews.Clear();
+            _libraryViews.Add("All Songs");
+            _libraryViews.Add("Favorites");
+            _libraryViews.Add("Recently Played");
+            _libraryViews.Add("Most Played");
+            foreach (string name in _state.Playlists.Keys.OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase))
+                _libraryViews.Add(name);
+
+            if (!_libraryViews.Contains(desired)) desired = "All Songs";
+            _activeLibraryView = desired;
+            CmbLibraryView.SelectedItem = desired;
+        }
+
+        private void CmbLibraryView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (CmbLibraryView.SelectedItem is string selected)
+            {
+                _activeLibraryView = selected;
+                ApplyLibraryFilter();
+            }
+        }
+
+        private void BtnNewPlaylist_Click(object sender, RoutedEventArgs e)
+        {
+            string? name = PromptForText("New Playlist", "Playlist name:");
+            if (string.IsNullOrWhiteSpace(name)) return;
+            name = name.Trim();
+            if (name.Equals("All Songs", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Favorites", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Recently Played", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Most Played", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("Bu isim SoundVibe tarafından ayrılmış.", "SoundVibe", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            if (!_state.Playlists.ContainsKey(name))
+                _state.Playlists[name] = new List<string>();
+            _activeLibraryView = name;
+            RefreshLibraryViews();
+            SavePersistentState();
+        }
+
+        private void BtnAddToPlaylist_Click(object sender, RoutedEventArgs e)
+        {
+            SongModel? song = LstSongs.SelectedItem as SongModel ?? PlaybackManager.Instance.CurrentSong;
+            if (song != null) AddSongToPlaylist(song);
+        }
+
+        private void MenuToggleFavorite_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem m && m.DataContext is SongModel song)
+            {
+                song.IsFavorite = !song.IsFavorite;
+                SyncSongState(song);
+                SavePersistentState();
+                if (_activeLibraryView == "Favorites") ApplyLibraryFilter();
+            }
+        }
+
+        private void MenuAddToActivePlaylist_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem m && m.DataContext is SongModel song)
+                AddSongToPlaylist(song);
+        }
+
+        private void AddSongToPlaylist(SongModel song)
+        {
+            string playlistName = _activeLibraryView;
+            if (!_state.Playlists.ContainsKey(playlistName))
+            {
+                string? entered = PromptForText("Add to Playlist", "Playlist name (existing or new):");
+                if (string.IsNullOrWhiteSpace(entered)) return;
+                playlistName = entered.Trim();
+                if (!_state.Playlists.ContainsKey(playlistName))
+                    _state.Playlists[playlistName] = new List<string>();
+            }
+
+            var paths = _state.Playlists[playlistName];
+            if (!paths.Any(p => string.Equals(p, song.FilePath, StringComparison.OrdinalIgnoreCase)))
+                paths.Add(song.FilePath);
+            SavePersistentState();
+            RefreshLibraryViews();
+        }
+
+        private string? PromptForText(string title, string prompt)
+        {
+            var dialog = new Window
+            {
+                Title = title,
+                Width = 360,
+                Height = 150,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize,
+                Background = new SolidColorBrush(Color.FromRgb(18, 18, 22)),
+                Foreground = Brushes.White,
+                WindowStyle = WindowStyle.ToolWindow
+            };
+            var grid = new Grid { Margin = new Thickness(14) };
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var label = new TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 8) };
+            var box = new TextBox { Height = 28, Padding = new Thickness(6, 2, 6, 2) };
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            var ok = new Button { Content = "OK", Width = 70, Height = 28, IsDefault = true, Margin = new Thickness(0, 0, 6, 0) };
+            var cancel = new Button { Content = "Cancel", Width = 70, Height = 28, IsCancel = true };
+            ok.Click += (s, e) => dialog.DialogResult = true;
+            buttons.Children.Add(ok); buttons.Children.Add(cancel);
+            Grid.SetRow(box, 1); Grid.SetRow(buttons, 2);
+            grid.Children.Add(label); grid.Children.Add(box); grid.Children.Add(buttons);
+            dialog.Content = grid;
+            dialog.Loaded += (s, e) => { box.Focus(); Keyboard.Focus(box); };
+            return dialog.ShowDialog() == true ? box.Text : null;
         }
 
         private void MenuPlayNext_Click(object sender, RoutedEventArgs e)
@@ -1160,6 +1762,339 @@ namespace SoundVibe
         private void MenuAddQueue_Click(object sender, RoutedEventArgs e)
         {
             if (sender is MenuItem m && m.DataContext is SongModel s) PlaybackManager.Instance.AddLastQueue(s);
+        }
+
+        private void QueueRemove_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.DataContext is SongModel song)
+                PlaybackManager.Instance.RemoveFromUserQueue(song);
+        }
+
+        private void CmbRenderMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            _renderFps = CmbRenderMode.SelectedIndex switch
+            {
+                0 => 0,
+                1 => 30,
+                _ => 60
+            };
+            if (_renderFps == 0)
+            {
+                _mainVisHost?.Clear();
+                _miniVisHost?.Clear();
+            }
+            RestartVisualRenderingOnly();
+        }
+
+        private void ChangeLyricOffset(int deltaMs)
+        {
+            LyricEngine.Instance.OffsetMilliseconds = Math.Max(-3000, Math.Min(3000, LyricEngine.Instance.OffsetMilliseconds + deltaMs));
+            UpdateLyricOffsetLabel();
+        }
+
+        private void UpdateLyricOffsetLabel()
+        {
+            if (TxtLyricOffset != null)
+                TxtLyricOffset.Text = $"{LyricEngine.Instance.OffsetMilliseconds:+0;-0;0}ms";
+        }
+
+        private void SetupTrayIcon()
+        {
+            if (_trayIcon != null) return;
+            try
+            {
+                var menu = new System.Windows.Forms.ContextMenuStrip();
+                menu.Items.Add("Show SoundVibe", null, (s, e) => Dispatcher.Invoke(RestoreFromTray));
+                menu.Items.Add("Play / Pause", null, (s, e) => Dispatcher.Invoke(() => BtnPlayPause_Click(this, new RoutedEventArgs())));
+                menu.Items.Add("Previous", null, (s, e) => Dispatcher.Invoke(() => BtnPrev_Click(this, new RoutedEventArgs())));
+                menu.Items.Add("Next", null, (s, e) => Dispatcher.Invoke(() => BtnNext_Click(this, new RoutedEventArgs())));
+                menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+                menu.Items.Add("Exit", null, (s, e) => Dispatcher.Invoke(Close));
+
+                _trayIcon = new System.Windows.Forms.NotifyIcon
+                {
+                    Icon = System.Drawing.SystemIcons.Application,
+                    Text = "SoundVibe",
+                    Visible = true,
+                    ContextMenuStrip = menu
+                };
+                _trayIcon.DoubleClick += (s, e) => Dispatcher.Invoke(RestoreFromTray);
+            }
+            catch { }
+        }
+
+        private void HideToTray()
+        {
+            StopRendering();
+            Hide();
+            if (_trayIcon != null) _trayIcon.Visible = true;
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+            Topmost = true;
+            Topmost = isMiniPlayer;
+            if (AudioEngine.Instance.IsPlaying) StartRendering();
+        }
+
+        private const int WM_APPCOMMAND = 0x0319;
+        private const int APPCOMMAND_MEDIA_NEXTTRACK = 11;
+        private const int APPCOMMAND_MEDIA_PREVIOUSTRACK = 12;
+        private const int APPCOMMAND_MEDIA_STOP = 13;
+        private const int APPCOMMAND_MEDIA_PLAY_PAUSE = 14;
+
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg != WM_APPCOMMAND) return IntPtr.Zero;
+            int command = ((int)((long)lParam >> 16)) & 0x7FF;
+            switch (command)
+            {
+                case APPCOMMAND_MEDIA_NEXTTRACK:
+                    BtnNext_Click(this, new RoutedEventArgs()); handled = true; break;
+                case APPCOMMAND_MEDIA_PREVIOUSTRACK:
+                    BtnPrev_Click(this, new RoutedEventArgs()); handled = true; break;
+                case APPCOMMAND_MEDIA_PLAY_PAUSE:
+                    BtnPlayPause_Click(this, new RoutedEventArgs()); handled = true; break;
+                case APPCOMMAND_MEDIA_STOP:
+                    AudioEngine.Instance.Pause(); UpdatePlayButtons(false); StopRendering(); handled = true; break;
+            }
+            return IntPtr.Zero;
+        }
+
+        private void Window_DragOver(object sender, DragEventArgs e)
+        {
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private async void Window_Drop(object sender, DragEventArgs e)
+        {
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+            if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return;
+
+            string? folder = paths.FirstOrDefault(Directory.Exists);
+            if (!string.IsNullOrWhiteSpace(folder))
+            {
+                await LoadFolderAsync(folder);
+                return;
+            }
+
+            SongModel? firstAdded = null;
+            foreach (string file in paths.Where(IsAudioFile))
+            {
+                if (Playlist.Any(x => string.Equals(x.FilePath, file, StringComparison.OrdinalIgnoreCase))) continue;
+                SongModel? song = await Task.Run(() => SongModel.CreateFromFile(file));
+                if (song == null) continue;
+                ApplySongState(song);
+                Playlist.Add(song);
+                UpdateCacheEntry(song);
+                firstAdded ??= song;
+            }
+            PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+            SaveLibraryCache();
+            if (firstAdded != null)
+            {
+                PlaybackManager.Instance.SetCurrentSong(firstAdded);
+                PlayCurrentSong();
+            }
+        }
+
+        private void LoadPersistentState()
+        {
+            try
+            {
+                if (System.IO.File.Exists(StatePath))
+                {
+                    var loaded = JsonSerializer.Deserialize<SoundVibeState>(System.IO.File.ReadAllText(StatePath), JsonOptions);
+                    if (loaded != null) _state = loaded;
+                }
+            }
+            catch { _state = new SoundVibeState(); }
+
+            _state.Playlists = new Dictionary<string, List<string>>(_state.Playlists ?? new Dictionary<string, List<string>>(), StringComparer.OrdinalIgnoreCase);
+            _state.Songs = new Dictionary<string, SongStateRecord>(_state.Songs ?? new Dictionary<string, SongStateRecord>(), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private void SavePersistentState()
+        {
+            try
+            {
+                Directory.CreateDirectory(AppDataRoot);
+                System.IO.File.WriteAllText(StatePath, JsonSerializer.Serialize(_state, JsonOptions));
+            }
+            catch { }
+        }
+
+        private void ApplySongState(SongModel song)
+        {
+            if (_state.Songs.TryGetValue(song.FilePath, out var record))
+            {
+                song.IsFavorite = record.IsFavorite;
+                song.PlayCount = record.PlayCount;
+                song.LastPlayedUtc = record.LastPlayedUtc;
+            }
+        }
+
+        private void SyncSongState(SongModel song)
+        {
+            _state.Songs[song.FilePath] = new SongStateRecord
+            {
+                IsFavorite = song.IsFavorite,
+                PlayCount = song.PlayCount,
+                LastPlayedUtc = song.LastPlayedUtc
+            };
+        }
+
+        private void LoadLibraryCache()
+        {
+            try
+            {
+                if (System.IO.File.Exists(CachePath))
+                {
+                    var list = JsonSerializer.Deserialize<List<LibraryCacheEntry>>(System.IO.File.ReadAllText(CachePath), JsonOptions) ?? new List<LibraryCacheEntry>();
+                    _libraryCache = list.Where(x => !string.IsNullOrWhiteSpace(x.FilePath))
+                        .GroupBy(x => x.FilePath, StringComparer.OrdinalIgnoreCase)
+                        .Select(g => g.First())
+                        .ToDictionary(x => x.FilePath, x => x, StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            catch { _libraryCache = new Dictionary<string, LibraryCacheEntry>(StringComparer.OrdinalIgnoreCase); }
+        }
+
+        private void SaveLibraryCache()
+        {
+            try
+            {
+                Directory.CreateDirectory(AppDataRoot);
+                System.IO.File.WriteAllText(CachePath, JsonSerializer.Serialize(_libraryCache.Values.ToList(), JsonOptions));
+            }
+            catch { }
+        }
+
+        private void UpdateCacheEntry(SongModel song)
+        {
+            try
+            {
+                _libraryCache[song.FilePath] = new LibraryCacheEntry
+                {
+                    FilePath = song.FilePath,
+                    LastWriteUtcTicks = System.IO.File.GetLastWriteTimeUtc(song.FilePath).Ticks,
+                    Title = song.Title,
+                    Artist = song.Artist,
+                    Bitrate = song.Bitrate,
+                    SampleRate = song.SampleRate
+                };
+            }
+            catch { }
+        }
+
+        private static bool IsAudioFile(string path)
+        {
+            try { return System.IO.File.Exists(path) && AudioExtensions.Contains(Path.GetExtension(path)); }
+            catch { return false; }
+        }
+
+        private void SetupLibraryWatcher(string path)
+        {
+            DisposeLibraryWatcher();
+            try
+            {
+                _libraryWatcher = new FileSystemWatcher(path)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+                    EnableRaisingEvents = true
+                };
+                _libraryWatcher.Created += LibraryWatcher_Created;
+                _libraryWatcher.Deleted += LibraryWatcher_Deleted;
+                _libraryWatcher.Renamed += LibraryWatcher_Renamed;
+            }
+            catch { DisposeLibraryWatcher(); }
+        }
+
+        private void DisposeLibraryWatcher()
+        {
+            if (_libraryWatcher == null) return;
+            try
+            {
+                _libraryWatcher.EnableRaisingEvents = false;
+                _libraryWatcher.Created -= LibraryWatcher_Created;
+                _libraryWatcher.Deleted -= LibraryWatcher_Deleted;
+                _libraryWatcher.Renamed -= LibraryWatcher_Renamed;
+                _libraryWatcher.Dispose();
+            }
+            catch { }
+            _libraryWatcher = null;
+        }
+
+        private async void LibraryWatcher_Created(object sender, FileSystemEventArgs e)
+        {
+            if (!AudioExtensions.Contains(Path.GetExtension(e.FullPath))) return;
+            await Task.Delay(350);
+            if (_isClosing || !System.IO.File.Exists(e.FullPath)) return;
+            SongModel? song = await Task.Run(() => SongModel.CreateFromFile(e.FullPath));
+            if (song == null || _isClosing) return;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (Playlist.Any(x => string.Equals(x.FilePath, song.FilePath, StringComparison.OrdinalIgnoreCase))) return;
+                ApplySongState(song);
+                Playlist.Add(song);
+                UpdateCacheEntry(song);
+                PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+                SaveLibraryCache();
+                ApplyLibraryFilter();
+            });
+        }
+
+        private void LibraryWatcher_Deleted(object sender, FileSystemEventArgs e)
+        {
+            if (!AudioExtensions.Contains(Path.GetExtension(e.FullPath))) return;
+            Dispatcher.BeginInvoke(new Action(() => RemoveLibraryPath(e.FullPath)));
+        }
+
+        private async void LibraryWatcher_Renamed(object sender, RenamedEventArgs e)
+        {
+            await Dispatcher.InvokeAsync(() => RemoveLibraryPath(e.OldFullPath));
+            if (AudioExtensions.Contains(Path.GetExtension(e.FullPath)))
+                LibraryWatcher_Created(sender, new FileSystemEventArgs(WatcherChangeTypes.Created, Path.GetDirectoryName(e.FullPath) ?? "", Path.GetFileName(e.FullPath)));
+        }
+
+        private void RemoveLibraryPath(string path)
+        {
+            var song = Playlist.FirstOrDefault(x => string.Equals(x.FilePath, path, StringComparison.OrdinalIgnoreCase));
+            if (song != null) Playlist.Remove(song);
+            _libraryCache.Remove(path);
+            _state.Songs.Remove(path);
+            foreach (var list in _state.Playlists.Values)
+                list.RemoveAll(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase));
+            PlaybackManager.Instance.RemoveFromUserQueueByPath(path);
+            PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+            SaveLibraryCache();
+            SavePersistentState();
+        }
+
+        private async void BtnResumeLast_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_resumePath)) return;
+            var song = Playlist.FirstOrDefault(x => string.Equals(x.FilePath, _resumePath, StringComparison.OrdinalIgnoreCase));
+            if (song == null) return;
+            PlaybackManager.Instance.SetCurrentSong(song);
+            PlayCurrentSong();
+            await Task.Delay(100);
+            AudioEngine.Instance.Seek(TimeSpan.FromSeconds(Math.Min(_resumeSeconds, Math.Max(0, AudioEngine.Instance.TotalTime.TotalSeconds - 1))));
+            BtnResumeLast.Visibility = Visibility.Collapsed;
+        }
+
+        private void UpdateResumeButton()
+        {
+            bool canResume = _resumeSeconds > 1 && !string.IsNullOrWhiteSpace(_resumePath) &&
+                             Playlist.Any(x => string.Equals(x.FilePath, _resumePath, StringComparison.OrdinalIgnoreCase));
+            BtnResumeLast.Visibility = canResume ? Visibility.Visible : Visibility.Collapsed;
+            if (canResume)
+                BtnResumeLast.Content = $"↻ Resume {TimeSpan.FromSeconds(_resumeSeconds):mm\\:ss}";
         }
 
         private void ToggleMiniPlayer(object sender, RoutedEventArgs e)
@@ -1197,48 +2132,118 @@ namespace SoundVibe
         // --- GÜNCELLENEN: YÜKLEME KODUNU DIŞARI ALDIK (OTOMATİK YÜKLEME İÇİN) ---
         private async Task LoadFolderAsync(string path)
         {
-            if (BtnAddFolder != null)
-            {
-                BtnAddFolder.Content = "⏳ Yükleniyor...";
-                BtnAddFolder.IsEnabled = false;
-            }
+            if (!Directory.Exists(path)) return;
 
-            Playlist.Clear();
-            string[] extensions = { "*.mp3", "*.flac", "*.wav", "*.ogg", "*.m4a", "*.aiff", "*.aac" };
-            string[] files = extensions
-                .SelectMany(ext => System.IO.Directory.GetFiles(path, ext, SearchOption.AllDirectories))
-                .Distinct()
-                .OrderBy(f => f)
-                .ToArray();
+            _libraryLoadCts?.Cancel();
+            _libraryLoadCts?.Dispose();
+            _libraryLoadCts = new CancellationTokenSource();
+            CancellationToken token = _libraryLoadCts.Token;
+            DisposeLibraryWatcher();
 
-            var loadedSongs = await Task.Run(() =>
+            BtnAddFolder.Content = "⏳ Loading...";
+            BtnAddFolder.IsEnabled = false;
+
+            try
             {
-                var temp = new List<SongModel>();
-                foreach (var file in files)
+                var loadedSongs = await Task.Run(() =>
                 {
-                    var song = SongModel.CreateFromFile(file);
-                    if (song != null) temp.Add(song);
+                    var temp = new List<SongModel>();
+                    IEnumerable<string> files;
+                    try
+                    {
+                        files = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
+                            .Where(f => AudioExtensions.Contains(Path.GetExtension(f)))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+                    }
+                    catch
+                    {
+                        files = Array.Empty<string>();
+                    }
+
+                    foreach (string file in files)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        SongModel? song = null;
+                        try
+                        {
+                            long ticks = System.IO.File.GetLastWriteTimeUtc(file).Ticks;
+                            if (_libraryCache.TryGetValue(file, out var cached) && cached.LastWriteUtcTicks == ticks)
+                                song = SongModel.CreateFromCache(cached);
+                            else
+                                song = SongModel.CreateFromFile(file);
+                        }
+                        catch { }
+                        if (song != null) temp.Add(song);
+                    }
+                    return temp;
+                }, token);
+
+                token.ThrowIfCancellationRequested();
+                Playlist.Clear();
+                const int chunkSize = 80;
+                for (int i = 0; i < loadedSongs.Count; i += chunkSize)
+                {
+                    token.ThrowIfCancellationRequested();
+                    foreach (var song in loadedSongs.Skip(i).Take(chunkSize))
+                    {
+                        ApplySongState(song);
+                        Playlist.Add(song);
+                        UpdateCacheEntry(song);
+                    }
+                    await Task.Yield();
                 }
-                return temp;
-            });
 
-            int chunkSize = 50;
-            for (int i = 0; i < loadedSongs.Count; i += chunkSize)
-            {
-                var chunk = loadedSongs.Skip(i).Take(chunkSize);
-                foreach (var song in chunk) Playlist.Add(song);
-                await Task.Delay(1);
+                TxtSearch.Text = "";
+                _pendingSearch = "";
+                PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+                _lastFolderPath = path;
+                SetupLibraryWatcher(path);
+                SaveLibraryCache();
+                ApplyLibraryFilter();
+                UpdateResumeButton();
+
+                _ = LoadMissingCoversSequentiallyAsync(
+                    Playlist.Where(x => x.CoverImage == null).ToList(), token);
             }
-
-            if (TxtSearch != null) TxtSearch.Text = "";
-            PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
-
-            if (BtnAddFolder != null)
+            catch (OperationCanceledException) { }
+            finally
             {
-                BtnAddFolder.Content = "📁 Add Folder";
-                BtnAddFolder.IsEnabled = true;
+                if (!token.IsCancellationRequested)
+                {
+                    BtnAddFolder.Content = "📁 Add Folder";
+                    BtnAddFolder.IsEnabled = true;
+                }
             }
-            _lastFolderPath = path;
+        }
+
+        private async Task LoadMissingCoversSequentiallyAsync(List<SongModel> songs, CancellationToken token)
+        {
+            foreach (var song in songs)
+            {
+                if (token.IsCancellationRequested || _isClosing) break;
+
+                try
+                {
+                    BitmapImage? cover = await Task.Run(
+                        () => SongModel.LoadCoverFromFile(song.FilePath, 180), token);
+
+                    if (cover != null && !token.IsCancellationRequested && !_isClosing)
+                        song.CoverImage = cover;
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // A corrupt/in-use file should not stop the rest of the library.
+                }
+
+                // Yield between files so large libraries never monopolize the UI loop.
+                await Task.Yield();
+            }
         }
 
         private void LstSongs_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1273,13 +2278,26 @@ namespace SoundVibe
                 AudioEngine.Instance.Pause();
                 UpdatePlayButtons(false);
                 StopRendering();
+                return;
             }
-            else
+
+            if (AudioEngine.Instance.HasTrack)
             {
                 AudioEngine.Instance.Resume();
-                UpdatePlayButtons(true);
-                StartRendering();
+                UpdatePlayButtons(AudioEngine.Instance.IsPlaying);
+                if (AudioEngine.Instance.IsPlaying) StartRendering();
+                return;
             }
+
+            var song = PlaybackManager.Instance.CurrentSong ?? Playlist.FirstOrDefault();
+            if (song == null)
+            {
+                UpdatePlayButtons(false);
+                return;
+            }
+
+            PlaybackManager.Instance.SetCurrentSong(song);
+            PlayCurrentSong();
         }
 
         private void SldVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e) => AudioEngine.Instance.SetVolume((float)(SldVolume.Value / 100.0));
@@ -1288,42 +2306,58 @@ namespace SoundVibe
         {
             var song = PlaybackManager.Instance.CurrentSong;
             if (song == null) return;
+            string requestedPath = song.FilePath;
 
-            LstSongs.SelectedItem = song;
-            LstSongs.ScrollIntoView(song);
+            try
+            {
+                LstSongs.SelectedItem = song;
+                LstSongs.ScrollIntoView(song);
+            }
+            catch { }
 
             float vol = SldVolume != null ? (float)(SldVolume.Value / 100.0) : 0.5f;
             AudioEngine.Instance.Play(song.FilePath, vol);
+            if (!AudioEngine.Instance.HasTrack)
+            {
+                UpdatePlayButtons(false);
+                StopRendering();
+                return;
+            }
+
             LyricEngine.Instance.LoadLyrics(song.FilePath);
 
+            song.PlayCount++;
+            song.LastPlayedUtc = DateTime.UtcNow;
+            SyncSongState(song);
+            SavePersistentState();
+            if (_activeLibraryView == "Recently Played" || _activeLibraryView == "Most Played")
+                ApplyLibraryFilter();
+
             Array.Clear(smoothedFft, 0, smoothedFft.Length);
+            Array.Clear(_logFft, 0, _logFft.Length);
             SetupVisualizer();
             UpdatePlayButtons(true);
             StartRendering();
+            BtnResumeLast.Visibility = Visibility.Collapsed;
 
             Color domColor = Color.FromRgb(74, 144, 226);
-            if (song.CoverImage != null)
-            {
-                int stride = 8 * 4;
-                var pixels = new byte[8 * stride];
-                try
-                {
-                    var scaled = new TransformedBitmap(song.CoverImage, new ScaleTransform(8.0 / song.CoverImage.PixelWidth, 8.0 / song.CoverImage.PixelHeight));
-                    scaled.CopyPixels(pixels, stride, 0);
+            UpdateUI(song, domColor);
 
-                    domColor = await Task.Run(() => {
-                        long r = 0, g = 0, b = 0, cnt = 0;
-                        for (int i = 0; i < pixels.Length; i += 4)
-                        {
-                            byte pb = pixels[i], pg = pixels[i + 1], pr = pixels[i + 2];
-                            if (pr + pg + pb > 80) { r += pr; g += pg; b += pb; cnt++; }
-                        }
-                        if (cnt == 0) return Color.FromRgb(74, 144, 226);
-                        return Color.FromRgb((byte)Math.Min(255, r / cnt * 1.3), (byte)Math.Min(255, g / cnt * 1.1), (byte)Math.Min(255, b / cnt * 1.3));
-                    });
+            if (song.CoverImage == null)
+            {
+                BitmapImage? cover = await Task.Run(() => SongModel.LoadCoverFromFile(song.FilePath, 350));
+                if (cover != null)
+                {
+                    song.CoverImage = cover;
+                    if (PlaybackManager.Instance.CurrentSong?.FilePath == requestedPath)
+                        UpdateUI(song, domColor);
                 }
-                catch { }
             }
+
+            if (song.CoverImage != null)
+                domColor = await ExtractDominantColorAsync(song.CoverImage);
+
+            if (PlaybackManager.Instance.CurrentSong?.FilePath != requestedPath) return;
 
             if (_currentTheme == 4)
             {
@@ -1331,7 +2365,51 @@ namespace SoundVibe
                 ApplyTheme(4);
             }
             UpdateUI(song, domColor);
-            ShowToastNotification(song); // OSD BİLDİRİMİNİ ÇAĞIRIYORUZ
+            ShowToastNotification(song);
+        }
+
+        private static async Task<Color> ExtractDominantColorAsync(BitmapSource source)
+        {
+            try
+            {
+                const int size = 16;
+                int stride = size * 4;
+                var pixels = new byte[size * stride];
+                var scaled = new TransformedBitmap(source, new ScaleTransform(
+                    size / (double)Math.Max(1, source.PixelWidth),
+                    size / (double)Math.Max(1, source.PixelHeight)));
+                var converted = new FormatConvertedBitmap(scaled, PixelFormats.Bgra32, null, 0);
+                converted.CopyPixels(pixels, stride, 0);
+
+                return await Task.Run(() =>
+                {
+                    var buckets = new Dictionary<int, (int Count, long R, long G, long B, double Weight)>();
+                    for (int i = 0; i + 3 < pixels.Length; i += 4)
+                    {
+                        byte b = pixels[i], g = pixels[i + 1], r = pixels[i + 2], a = pixels[i + 3];
+                        if (a < 80) continue;
+                        int max = Math.Max(r, Math.Max(g, b));
+                        int min = Math.Min(r, Math.Min(g, b));
+                        if (max < 28) continue;
+                        double saturation = max == 0 ? 0 : (max - min) / (double)max;
+                        double brightness = max / 255.0;
+                        double weight = 0.35 + saturation * 1.4 + Math.Min(brightness, 0.85) * 0.35;
+                        int key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+                        if (!buckets.TryGetValue(key, out var v)) v = (0, 0, 0, 0, 0);
+                        buckets[key] = (v.Count + 1, v.R + r, v.G + g, v.B + b, v.Weight + weight);
+                    }
+                    if (buckets.Count == 0) return Color.FromRgb(74, 144, 226);
+                    var best = buckets.Values.OrderByDescending(v => v.Weight * Math.Sqrt(v.Count)).First();
+                    return Color.FromRgb(
+                        (byte)Math.Min(255, best.R / Math.Max(1, best.Count)),
+                        (byte)Math.Min(255, best.G / Math.Max(1, best.Count)),
+                        (byte)Math.Min(255, best.B / Math.Max(1, best.Count)));
+                });
+            }
+            catch
+            {
+                return Color.FromRgb(74, 144, 226);
+            }
         }
 
         private void UpdatePlayButtons(bool playing)
@@ -1369,6 +2447,43 @@ namespace SoundVibe
         }
     }
 
+    public sealed class SoundVibeConfig
+    {
+        public double Volume { get; set; } = 50;
+        public int ThemeIndex { get; set; } = 0;
+        public int EqPresetIndex { get; set; } = 0;
+        public string LastFolderPath { get; set; } = "";
+        public int RenderFps { get; set; } = 60;
+        public int LyricOffsetMs { get; set; } = 200;
+        public string LastSongPath { get; set; } = "";
+        public double LastPositionSeconds { get; set; } = 0;
+        public string LastLibraryView { get; set; } = "All Songs";
+        public int VisualizerModeIndex { get; set; } = 10;
+    }
+
+    public sealed class SoundVibeState
+    {
+        public Dictionary<string, SongStateRecord> Songs { get; set; } = new Dictionary<string, SongStateRecord>(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<string>> Playlists { get; set; } = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public sealed class SongStateRecord
+    {
+        public bool IsFavorite { get; set; }
+        public int PlayCount { get; set; }
+        public DateTime? LastPlayedUtc { get; set; }
+    }
+
+    public sealed class LibraryCacheEntry
+    {
+        public string FilePath { get; set; } = "";
+        public long LastWriteUtcTicks { get; set; }
+        public string Title { get; set; } = "";
+        public string Artist { get; set; } = "";
+        public int Bitrate { get; set; }
+        public int SampleRate { get; set; }
+    }
+
     #region [ 2. PLAYBACK & QUEUE MANAGER ]
     public class PlaybackManager
     {
@@ -1376,19 +2491,23 @@ namespace SoundVibe
 
         private List<SongModel> _originalQueue = new List<SongModel>();
         private List<SongModel> _shuffledQueue = new List<SongModel>();
-        private List<SongModel> _userQueue = new List<SongModel>();
         private int _currentIndex = -1;
-        private Random _rnd = new Random();
-
+        private readonly Random _rnd = new Random();
         private bool _isShuffle = false;
+
+        public ObservableCollection<SongModel> UserQueue { get; } = new ObservableCollection<SongModel>();
 
         public bool IsShuffle
         {
             get => _isShuffle;
             set
             {
+                SongModel? current = CurrentSong;
                 _isShuffle = value;
-                if (_isShuffle) GenerateShuffleQueue();
+                if (_isShuffle)
+                    GenerateShuffleQueue(current);
+                else
+                    _currentIndex = current == null ? -1 : _originalQueue.IndexOf(current);
             }
         }
 
@@ -1403,66 +2522,100 @@ namespace SoundVibe
             }
         }
 
-        public int QueueCount => _userQueue.Count;
+        public int QueueCount => UserQueue.Count;
 
         private PlaybackManager() { }
 
         public void UpdateQueue(List<SongModel> songs)
         {
+            SongModel? current = CurrentSong;
             _originalQueue = new List<SongModel>(songs);
-            if (IsShuffle) GenerateShuffleQueue();
+            if (IsShuffle)
+            {
+                GenerateShuffleQueue(current);
+            }
+            else
+            {
+                _currentIndex = current == null ? -1 : _originalQueue.IndexOf(current);
+            }
         }
 
-        private void GenerateShuffleQueue()
+        private void GenerateShuffleQueue(SongModel? current = null)
         {
             _shuffledQueue = new List<SongModel>(_originalQueue);
-            int n = _shuffledQueue.Count;
-            while (n > 1)
+            for (int n = _shuffledQueue.Count - 1; n > 0; n--)
             {
-                n--;
                 int k = _rnd.Next(n + 1);
-                var value = _shuffledQueue[k];
-                _shuffledQueue[k] = _shuffledQueue[n];
-                _shuffledQueue[n] = value;
+                (_shuffledQueue[n], _shuffledQueue[k]) = (_shuffledQueue[k], _shuffledQueue[n]);
             }
-
-            if (_currentIndex >= 0 && _currentIndex < _originalQueue.Count)
+            if (current != null && _shuffledQueue.Remove(current))
             {
-                var current = _originalQueue[_currentIndex];
-                _shuffledQueue.Remove(current);
                 _shuffledQueue.Insert(0, current);
                 _currentIndex = 0;
             }
         }
 
-        public void AddPlayNext(SongModel song) => _userQueue.Insert(0, song);
-        public void AddLastQueue(SongModel song) => _userQueue.Add(song);
+        public void AddPlayNext(SongModel song)
+        {
+            UserQueue.Insert(0, song);
+        }
+
+        public void AddLastQueue(SongModel song)
+        {
+            UserQueue.Add(song);
+        }
+
+        public void RemoveFromUserQueue(SongModel song)
+        {
+            UserQueue.Remove(song);
+        }
+
+        public void RemoveFromUserQueueByPath(string path)
+        {
+            for (int i = UserQueue.Count - 1; i >= 0; i--)
+                if (string.Equals(UserQueue[i].FilePath, path, StringComparison.OrdinalIgnoreCase))
+                    UserQueue.RemoveAt(i);
+        }
+
+        public void ClearUserQueue() => UserQueue.Clear();
 
         public void SetCurrentSong(SongModel song)
         {
             var targetList = IsShuffle ? _shuffledQueue : _originalQueue;
             _currentIndex = targetList.IndexOf(song);
+            if (_currentIndex < 0 && IsShuffle && _originalQueue.Contains(song))
+            {
+                _shuffledQueue.Insert(0, song);
+                _currentIndex = 0;
+            }
         }
 
         public bool GoToNext()
         {
             var targetList = IsShuffle ? _shuffledQueue : _originalQueue;
             if (targetList.Count == 0) return false;
-            if (IsRepeat) return true;
+            if (IsRepeat) return CurrentSong != null;
 
-            if (_userQueue.Count > 0)
+            if (UserQueue.Count > 0)
             {
-                var next = _userQueue[0];
-                _userQueue.RemoveAt(0);
+                var next = UserQueue[0];
+                UserQueue.RemoveAt(0);
                 SetCurrentSong(next);
-                return true;
+                return CurrentSong != null;
             }
 
             _currentIndex++;
             if (_currentIndex >= targetList.Count)
             {
-                _currentIndex = 0;
-                if (IsShuffle) GenerateShuffleQueue();
+                if (IsShuffle)
+                {
+                    GenerateShuffleQueue();
+                    _currentIndex = 0;
+                }
+                else
+                {
+                    _currentIndex = 0;
+                }
             }
             return true;
         }
@@ -1479,14 +2632,64 @@ namespace SoundVibe
     #endregion
 
     #region [ 3. ASYNC DATA MODEL ]
-    public class SongModel
+    public class SongModel : INotifyPropertyChanged
     {
+        private BitmapImage? _coverImage;
+        private bool _isFavorite;
+        private int _playCount;
+        private DateTime? _lastPlayedUtc;
+
         public string Title { get; set; } = "Bilinmeyen Şarkı";
         public string Artist { get; set; } = "Bilinmeyen Sanatçı";
         public string FilePath { get; set; } = "";
-        public BitmapImage? CoverImage { get; set; }
         public int Bitrate { get; set; }
         public int SampleRate { get; set; }
+
+        public BitmapImage? CoverImage
+        {
+            get => _coverImage;
+            set
+            {
+                if (ReferenceEquals(_coverImage, value)) return;
+                _coverImage = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CoverImage)));
+            }
+        }
+
+        public bool IsFavorite
+        {
+            get => _isFavorite;
+            set
+            {
+                if (_isFavorite == value) return;
+                _isFavorite = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsFavorite)));
+            }
+        }
+
+        public int PlayCount
+        {
+            get => _playCount;
+            set
+            {
+                if (_playCount == value) return;
+                _playCount = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PlayCount)));
+            }
+        }
+
+        public DateTime? LastPlayedUtc
+        {
+            get => _lastPlayedUtc;
+            set
+            {
+                if (_lastPlayedUtc == value) return;
+                _lastPlayedUtc = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastPlayedUtc)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
 
         public static SongModel? CreateFromFile(string path)
         {
@@ -1498,29 +2701,58 @@ namespace SoundVibe
                     FilePath = path,
                     Title = string.IsNullOrWhiteSpace(tagFile.Tag.Title) ? Path.GetFileNameWithoutExtension(path) : tagFile.Tag.Title,
                     Artist = string.IsNullOrWhiteSpace(string.Join(", ", tagFile.Tag.Performers)) ? "Bilinmeyen Sanatçı" : string.Join(", ", tagFile.Tag.Performers),
-                    Bitrate = tagFile.Properties.AudioBitrate != 0 ? tagFile.Properties.AudioBitrate : ((tagFile.Properties.AudioSampleRate * 16 * 2) / 1000),
+                    Bitrate = tagFile.Properties.AudioBitrate != 0 ? tagFile.Properties.AudioBitrate : ((tagFile.Properties.AudioSampleRate * 16 * Math.Max(1, tagFile.Properties.AudioChannels)) / 1000),
                     SampleRate = tagFile.Properties.AudioSampleRate
                 };
 
                 if (tagFile.Tag.Pictures.Length >= 1)
-                {
-                    var bin = (byte[])tagFile.Tag.Pictures[0].Data.Data;
-                    using var ms = new MemoryStream(bin);
-                    var bmp = new BitmapImage();
-                    bmp.BeginInit();
-                    bmp.CacheOption = BitmapCacheOption.OnLoad;
-                    bmp.DecodePixelWidth = 350;
-                    bmp.StreamSource = ms;
-                    bmp.EndInit();
-                    bmp.Freeze();
-                    song.CoverImage = bmp;
-                }
+                    song.CoverImage = BitmapFromBytes((byte[])tagFile.Tag.Pictures[0].Data.Data, 350);
                 return song;
             }
             catch
             {
                 return null;
             }
+        }
+
+        public static SongModel CreateFromCache(LibraryCacheEntry cache)
+        {
+            return new SongModel
+            {
+                FilePath = cache.FilePath,
+                Title = string.IsNullOrWhiteSpace(cache.Title) ? Path.GetFileNameWithoutExtension(cache.FilePath) : cache.Title,
+                Artist = string.IsNullOrWhiteSpace(cache.Artist) ? "Bilinmeyen Sanatçı" : cache.Artist,
+                Bitrate = cache.Bitrate,
+                SampleRate = cache.SampleRate
+            };
+        }
+
+        public static BitmapImage? LoadCoverFromFile(string path, int decodePixelWidth)
+        {
+            try
+            {
+                using var tagFile = TagLib.File.Create(path);
+                if (tagFile.Tag.Pictures.Length < 1) return null;
+                return BitmapFromBytes((byte[])tagFile.Tag.Pictures[0].Data.Data, decodePixelWidth);
+            }
+            catch { return null; }
+        }
+
+        private static BitmapImage? BitmapFromBytes(byte[] bytes, int decodePixelWidth)
+        {
+            try
+            {
+                using var ms = new MemoryStream(bytes, writable: false);
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.DecodePixelWidth = Math.Max(32, decodePixelWidth);
+                bmp.StreamSource = ms;
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+            catch { return null; }
         }
     }
     #endregion
@@ -1592,8 +2824,10 @@ namespace SoundVibe
         private float[] currentEqGains = new float[10];
 
         public bool IsPlaying => outputDevice?.PlaybackState == PlaybackState.Playing;
+        public bool HasTrack => audioFile != null && outputDevice != null;
         public TimeSpan CurrentTime => audioFile?.CurrentTime ?? TimeSpan.Zero;
         public TimeSpan TotalTime => audioFile?.TotalTime ?? TimeSpan.Zero;
+        public int SampleRate => audioFile?.WaveFormat.SampleRate ?? 44100;
         public event EventHandler? TrackEnded;
 
         private AudioEngine() { }
@@ -1603,7 +2837,6 @@ namespace SoundVibe
             try
             {
                 Stop();
-                Thread.Sleep(20);
 
                 audioFile = new AudioFileReader(path);
                 analyzer = new AudioAnalyzer(audioFile);
@@ -1671,7 +2904,11 @@ namespace SoundVibe
             if (audioFile != null) audioFile.CurrentTime = t;
         }
 
-        public float[] GetFftData() => analyzer?.GetSafeFftResults() ?? Array.Empty<float>();
+        public int CopyFftData(float[] destination)
+        {
+            if (destination == null || destination.Length == 0 || analyzer == null) return 0;
+            return analyzer.CopyFftResults(destination);
+        }
 
         public void Dispose() => Stop();
     }
@@ -1679,7 +2916,7 @@ namespace SoundVibe
     public class AudioAnalyzer : ISampleProvider
     {
         private readonly ISampleProvider _source;
-        private readonly int _fftLength = 1024;
+        private readonly int _fftLength = 2048;
         private int _fftPos = 0;
         private Complex[] _fftBuffer;
         private float[] _fftResults;
@@ -1694,11 +2931,14 @@ namespace SoundVibe
             _fftResults = new float[_fftLength / 2];
         }
 
-        public float[] GetSafeFftResults()
+        public int CopyFftResults(float[] destination)
         {
+            if (destination == null || destination.Length == 0) return 0;
             lock (_fftLock)
             {
-                return (float[])_fftResults.Clone();
+                int count = Math.Min(destination.Length, _fftResults.Length);
+                Array.Copy(_fftResults, 0, destination, 0, count);
+                return count;
             }
         }
 
@@ -1741,6 +2981,7 @@ namespace SoundVibe
         public static LyricEngine Instance { get; } = new LyricEngine();
         private List<KeyValuePair<TimeSpan, string>> _syncLyrics = new();
         private string _staticLyrics = "";
+        public int OffsetMilliseconds { get; set; } = 200;
 
         private LyricEngine() { }
 
@@ -1769,6 +3010,9 @@ namespace SoundVibe
                     using var tf = TagLib.File.Create(filePath);
                     if (!string.IsNullOrWhiteSpace(tf.Tag.Lyrics)) _staticLyrics = tf.Tag.Lyrics;
                 }
+
+                if (_syncLyrics.Count > 1)
+                    _syncLyrics.Sort((a, b) => a.Key.CompareTo(b.Key));
             }
             catch { }
         }
@@ -1777,15 +3021,29 @@ namespace SoundVibe
         {
             if (_syncLyrics.Count > 0)
             {
-                string cur = "♪ ... ♪";
-                // YENİ EKLENEN: LİRİK SENKRONİZASYONUNA 200ms AVANS (OFFSET)
-                TimeSpan offsetTime = t.Add(TimeSpan.FromMilliseconds(200));
-                foreach (var kv in _syncLyrics)
+                TimeSpan offsetTime = t.Add(TimeSpan.FromMilliseconds(OffsetMilliseconds));
+
+                // Binary search avoids walking the whole lyric list four times a second.
+                int lo = 0;
+                int hi = _syncLyrics.Count - 1;
+                int best = -1;
+                while (lo <= hi)
                 {
-                    if (offsetTime >= kv.Key) cur = string.IsNullOrWhiteSpace(kv.Value) ? "♪" : kv.Value;
-                    else break;
+                    int mid = lo + ((hi - lo) / 2);
+                    if (_syncLyrics[mid].Key <= offsetTime)
+                    {
+                        best = mid;
+                        lo = mid + 1;
+                    }
+                    else
+                    {
+                        hi = mid - 1;
+                    }
                 }
-                return cur;
+
+                if (best < 0) return "♪ ... ♪";
+                string value = _syncLyrics[best].Value;
+                return string.IsNullOrWhiteSpace(value) ? "♪" : value;
             }
             return string.IsNullOrWhiteSpace(_staticLyrics) ? "♪ Lirik Bulunamadı ♪" : _staticLyrics;
         }
