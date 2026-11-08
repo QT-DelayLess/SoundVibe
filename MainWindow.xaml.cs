@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Collections.Generic;
+using Brush = System.Windows.Media.Brush;
 using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
@@ -19,8 +20,7 @@ using System.Threading;
 using System.Windows.Threading;
 using TagLib;
 
-// --- ÇAKIŞMA ÖNLEYİCİ ALIAS'LAR ---
-using Brush = System.Windows.Media.Brush;
+// --- ÇAKIŞMA ÖNLEYİCİ ALIAS'LAR ---   
 using Pen = System.Windows.Media.Pen;
 using Image = System.Windows.Controls.Image;
 using Rectangle = System.Windows.Shapes.Rectangle;
@@ -29,6 +29,7 @@ using TextBox = System.Windows.Controls.TextBox;
 using NAudio.Wave;
 using NAudio.Dsp;
 using MessageBox = System.Windows.MessageBox;
+using FontFamily = System.Windows.Media.FontFamily;
 using Color = System.Windows.Media.Color;
 using Point = System.Windows.Point;
 using ColorConverter = System.Windows.Media.ColorConverter;
@@ -697,7 +698,17 @@ namespace SoundVibe
         private readonly float[] _logFft = new float[64];
         private readonly DispatcherTimer _playbackUiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         private readonly DispatcherTimer _searchDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(160) };
-        private FileSystemWatcher? _libraryWatcher;
+        private readonly List<FileSystemWatcher> _libraryWatchers = new();
+        private readonly List<string> _libraryFolders = new();
+        private VisualizerHost? _fullscreenVisHost;
+        private bool _fullscreenVis;
+        private WindowState _previousWindowState = WindowState.Normal;
+        private Rect _previousWindowBounds;
+        private double _visSensitivity = 1.0;
+        private double _visSmoothing = 0.5;
+        private double _visBass = 1.0;
+        private readonly SystemAudioCapture _systemCapture = new();
+        private bool _systemAudioMode;
         private CancellationTokenSource? _libraryLoadCts;
         private System.Windows.Forms.NotifyIcon? _trayIcon;
         private HwndSource? _hwndSource;
@@ -707,6 +718,7 @@ namespace SoundVibe
         private Dictionary<string, LibraryCacheEntry> _libraryCache = new Dictionary<string, LibraryCacheEntry>(StringComparer.OrdinalIgnoreCase);
         private string _activeLibraryView = "All Songs";
         private string _pendingSearch = "";
+        private readonly HashSet<string> _duplicateFilePaths = new(StringComparer.OrdinalIgnoreCase);
         private string _resumePath = "";
         private double _resumeSeconds = 0;
 
@@ -754,7 +766,7 @@ namespace SoundVibe
         private RotateTransform? _vinylRotation;
         private System.Windows.Media.Effects.DropShadowEffect? _playGlow;
         private Rectangle? _bgColorRect;
-        private Image? _bgAmbientGlow;
+        private Border? _bgAmbientGlow;
         private Canvas? _mainVisCanvas;
         private Canvas? _miniVisCanvas;
 
@@ -786,7 +798,7 @@ namespace SoundVibe
             this.Loaded += async (s, e) =>
             {
                 CacheUiRefs();
-                _bgAmbientGlow = this.FindName("BgAmbientGlow") as Image;
+                _bgAmbientGlow = this.FindName("BgAmbientGlow") as Border;
                 WindowsServices.EnableAcrylicBlur(this);
                 LoadPersistentState();
                 LoadLibraryCache();
@@ -796,13 +808,20 @@ namespace SoundVibe
                 SetupShuffleRepeatButtons();
                 SetupEqualizer();
                 SetupTrayIcon();
+                FullscreenVisualizerCanvas.SizeChanged += (s, e) => ResizeVisualizerHosts();
+                BtnStudio.Click += (s, e) => { LibraryToolsPopup.IsOpen = false; StudioPopup.IsOpen = !StudioPopup.IsOpen; };
+                BtnLibraryTools.Click += (s, e) => { StudioPopup.IsOpen = false; LibraryToolsPopup.IsOpen = !LibraryToolsPopup.IsOpen; };
+                SldVisSensitivity.ValueChanged += (s, e) => _visSensitivity = SldVisSensitivity.Value;
+                SldVisSmoothing.ValueChanged += (s, e) => _visSmoothing = SldVisSmoothing.Value;
+                SldVisBass.ValueChanged += (s, e) => _visBass = SldVisBass.Value;
+                PreviewKeyDown += MainWindow_PreviewKeyDown;
                 await LoadSettingsAsync();
             };
 
             this.StateChanged += (s, e) =>
             {
                 if (this.WindowState == WindowState.Minimized) StopRendering();
-                else if (AudioEngine.Instance.IsPlaying) StartRendering();
+                else if (CanVisualize) StartRendering();
             };
 
             this.Closing += (s, e) =>
@@ -818,11 +837,12 @@ namespace SoundVibe
                 _trayIcon?.Dispose();
                 _libraryLoadCts?.Cancel();
                 _libraryLoadCts?.Dispose();
+                _systemCapture.Dispose();
                 AudioEngine.Instance.Dispose();
             };
 
             AudioEngine.Instance.TrackEnded += (s, e) =>
-                Dispatcher.Invoke(() => { if (PlaybackManager.Instance.GoToNext()) PlayCurrentSong(); });
+                Dispatcher.Invoke(() => { if (PlaybackManager.Instance.GoToNext(naturalEnd: true)) PlayCurrentSong(); });
 
             PlaybackManager.Instance.UserQueue.CollectionChanged += (s, e) => UpdateQueueCount();
 
@@ -890,14 +910,18 @@ namespace SoundVibe
                 {
                     Volume = SldVolume?.Value ?? 50,
                     ThemeIndex = _currentTheme,
-                    EqPresetIndex = FindVisualChildren<ComboBox>(this.FindName("EqViewPanel") as Grid).FirstOrDefault()?.SelectedIndex ?? 0,
+                    EqPresetIndex = CmbEqPreset.SelectedIndex,
                     LastFolderPath = _lastFolderPath,
                     RenderFps = _renderFps,
                     LyricOffsetMs = LyricEngine.Instance.OffsetMilliseconds,
                     LastSongPath = current?.FilePath ?? _resumePath,
                     LastPositionSeconds = current != null ? AudioEngine.Instance.CurrentTime.TotalSeconds : _resumeSeconds,
                     LastLibraryView = _activeLibraryView,
-                    VisualizerModeIndex = Math.Max(0, CmbVisualizerMode?.SelectedIndex ?? 0)
+                    VisualizerModeIndex = Math.Max(0, CmbVisualizerMode?.SelectedIndex ?? 0),
+                    LibraryFolders = _libraryFolders.ToList(),
+                    VisSensitivity = _visSensitivity,
+                    VisSmoothing = _visSmoothing,
+                    VisBass = _visBass
                 };
                 System.IO.File.WriteAllText(ConfigPath, JsonSerializer.Serialize(settings, JsonOptions));
             }
@@ -922,7 +946,7 @@ namespace SoundVibe
                 _currentTheme = Math.Max(0, Math.Min(_themeDefs.Length - 1, settings.ThemeIndex));
                 ApplyTheme(_currentTheme);
 
-                var presetCombo = FindVisualChildren<ComboBox>(this.FindName("EqViewPanel") as Grid).FirstOrDefault();
+                var presetCombo = CmbEqPreset;
                 if (presetCombo != null && settings.EqPresetIndex >= 0 && settings.EqPresetIndex < presetCombo.Items.Count)
                     presetCombo.SelectedIndex = settings.EqPresetIndex;
 
@@ -938,9 +962,17 @@ namespace SoundVibe
                 _resumePath = settings.LastSongPath ?? "";
                 _resumeSeconds = Math.Max(0, settings.LastPositionSeconds);
                 _lastFolderPath = settings.LastFolderPath ?? "";
-
-                if (!string.IsNullOrWhiteSpace(_lastFolderPath) && Directory.Exists(_lastFolderPath))
-                    await LoadFolderAsync(_lastFolderPath);
+                _visSensitivity = Math.Max(0.4, Math.Min(3.0, settings.VisSensitivity));
+                _visSmoothing = Math.Max(0, Math.Min(1, settings.VisSmoothing));
+                _visBass = Math.Max(0.5, Math.Min(3.0, settings.VisBass));
+                SldVisSensitivity.Value = _visSensitivity;
+                SldVisSmoothing.Value = _visSmoothing;
+                SldVisBass.Value = _visBass;
+                var roots = settings.LibraryFolders ?? new List<string>();
+                if (roots.Count == 0 && !string.IsNullOrWhiteSpace(_lastFolderPath)) roots.Add(_lastFolderPath);
+                foreach (var root in roots.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
+                    _libraryFolders.Add(root);
+                if (_libraryFolders.Count > 0) await ReloadAllFoldersAsync();
 
                 if (!string.IsNullOrWhiteSpace(settings.LastLibraryView) && _libraryViews.Contains(settings.LastLibraryView))
                 {
@@ -970,9 +1002,72 @@ namespace SoundVibe
         }
         // ----------------------------------------
 
+        private bool CanVisualize => _systemAudioMode ? _systemCapture.IsActive : AudioEngine.Instance.IsPlaying;
+
+        private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.F11) { ToggleFullscreenVisualizer(); e.Handled = true; }
+            else if (e.Key == Key.Escape && _fullscreenVis) { ToggleFullscreenVisualizer(); e.Handled = true; }
+        }
+
+        private void MenuFullscreen_Click(object sender, RoutedEventArgs e) { StudioPopup.IsOpen = false; ToggleFullscreenVisualizer(); }
+        private void ToggleFullscreenVisualizer()
+        {
+            if (isMiniPlayer) ToggleMiniPlayer(this, new RoutedEventArgs());
+            _fullscreenVis = !_fullscreenVis;
+            if (_fullscreenVis)
+            {
+                _previousWindowBounds = new Rect(Left, Top, Width, Height);
+                _previousWindowState = WindowState;
+                WindowState = WindowState.Normal;
+                WindowState = WindowState.Maximized;
+                FullscreenVisPanel.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                FullscreenVisPanel.Visibility = Visibility.Collapsed;
+                WindowState = WindowState.Normal;
+                Left = _previousWindowBounds.Left;
+                Top = _previousWindowBounds.Top;
+                Width = _previousWindowBounds.Width;
+                Height = _previousWindowBounds.Height;
+                WindowState = _previousWindowState;
+            }
+            ResizeVisualizerHosts();
+            if (CanVisualize) StartRendering();
+        }
+
+        private void MenuResetStudio_Click(object sender, RoutedEventArgs e)
+        {
+            SldVisSensitivity.Value = 1;
+            SldVisSmoothing.Value = 0.5;
+            SldVisBass.Value = 1;
+        }
+
+        private void MenuSystemAudio_Click(object sender, RoutedEventArgs e)
+        {
+            bool want = MenuSystemAudio.IsChecked == true;
+            if (want)
+            {
+                try { _systemCapture.Start(); _systemAudioMode = true; StartRendering(); }
+                catch (Exception ex)
+                {
+                    MenuSystemAudio.IsChecked = false;
+                    _systemAudioMode = false;
+                    MessageBox.Show("System audio capture: " + ex.Message, "SoundVibe", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+            else
+            {
+                _systemAudioMode = false;
+                _systemCapture.Stop();
+                if (AudioEngine.Instance.IsPlaying) StartRendering(); else StopRendering();
+            }
+        }
+
         private void StartRendering()
         {
-            if (!AudioEngine.Instance.IsPlaying) return;
+            if (!CanVisualize) return;
 
             if (!_playbackUiTimer.IsEnabled)
                 _playbackUiTimer.Start();
@@ -1008,7 +1103,7 @@ namespace SoundVibe
                 _renderTimer.Reset();
                 _isRendering = false;
             }
-            if (AudioEngine.Instance.IsPlaying)
+            if (CanVisualize)
                 StartRendering();
         }
 
@@ -1033,15 +1128,18 @@ namespace SoundVibe
                 }
             }
 
-            if (_txtCurrentTime != null) _txtCurrentTime.Text = currentTime.ToString(@"mm\:ss");
-            if (_txtTotalTime != null) _txtTotalTime.Text = totalTime.ToString(@"mm\:ss");
+            if (_txtCurrentTime != null) _txtCurrentTime.Text = FormatTime(currentTime);
+            if (_txtTotalTime != null) _txtTotalTime.Text = FormatTime(totalTime);
 
             string lyric = LyricEngine.Instance.GetCurrentLyric(currentTime);
             if (_txtWidgetLyrics != null) _txtWidgetLyrics.Text = lyric;
+            if (_fullscreenVis) TxtFullscreenLyrics.Text = lyric;
             if ((CmbVisualizerMode?.SelectedIndex ?? 0) == KARAOKE_VISUALIZER_INDEX && _txtBigKaraokeLyrics != null)
                 _txtBigKaraokeLyrics.Text = lyric;
             UpdateQueueCount();
         }
+
+        private static string FormatTime(TimeSpan t) => t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"mm\:ss");
 
         private void UpdateQueueCount()
         {
@@ -1093,10 +1191,11 @@ namespace SoundVibe
                 };
             }
 
-            var presetCombo = FindVisualChildren<ComboBox>(eqPanel).FirstOrDefault();
+            var presetCombo = CmbEqPreset;
             if (presetCombo != null)
             {
                 presetCombo.SelectionChanged += (s, e) => ApplyEqPreset(presetCombo.SelectedIndex, sliders);
+                ApplyEqPreset(Math.Max(0, presetCombo.SelectedIndex), sliders);
             }
         }
 
@@ -1224,8 +1323,7 @@ namespace SoundVibe
             _wavePen.Freeze();
 
             if (_playGlow != null) _playGlow.Color = t.accent;
-            var bgAmbient = this.FindName("BgAmbientGlow") as System.Windows.Controls.Image;
-            if (bgAmbient != null) bgAmbient.Opacity = t.ambientOpacity;
+            if (_bgAmbientGlow != null) _bgAmbientGlow.Opacity = t.ambientOpacity;
 
             if (BtnTheme != null) BtnTheme.Content = t.name;
             ApplyThemeBrushesToHosts();
@@ -1244,6 +1342,7 @@ namespace SoundVibe
             };
             _mainVisHost?.UpdateThemeBrushes(t.accent, crtColor);
             _miniVisHost?.UpdateThemeBrushes(t.accent, crtColor);
+            _fullscreenVisHost?.UpdateThemeBrushes(t.accent, crtColor);
         }
 
         private void CacheUiRefs()
@@ -1316,6 +1415,9 @@ namespace SoundVibe
 
             _mainVisHost = new VisualizerHost();
             _miniVisHost = _miniVisCanvas != null ? new VisualizerHost() : null;
+            FullscreenVisualizerCanvas.Children.Clear();
+            _fullscreenVisHost = new VisualizerHost();
+            FullscreenVisualizerCanvas.Children.Add(_fullscreenVisHost);
 
             if (_mainVisHost != null)
                 _mainVisCanvas.Children.Add(_mainVisHost);
@@ -1325,6 +1427,7 @@ namespace SoundVibe
             ResizeVisualizerHosts();
             _mainVisHost?.ResetHistory();
             _miniVisHost?.ResetHistory();
+            _fullscreenVisHost?.ResetHistory();
             ApplyThemeBrushesToHosts();
 
             int mode = CmbVisualizerMode.SelectedIndex;
@@ -1356,6 +1459,11 @@ namespace SoundVibe
 
         private void ResizeVisualizerHosts()
         {
+            if (_fullscreenVisHost != null)
+            {
+                _fullscreenVisHost.Width = Math.Max(1, FullscreenVisualizerCanvas.ActualWidth);
+                _fullscreenVisHost.Height = Math.Max(1, FullscreenVisualizerCanvas.ActualHeight);
+            }
             if (_mainVisHost != null && _mainVisCanvas != null)
             {
                 _mainVisHost.Width = _mainVisCanvas.ActualWidth > 0 ? _mainVisCanvas.ActualWidth : 700;
@@ -1371,7 +1479,7 @@ namespace SoundVibe
 
         private void RenderLoop(object? sender, EventArgs e)
         {
-            if (!AudioEngine.Instance.IsPlaying || _renderFps <= 0) return;
+            if (!CanVisualize || _renderFps <= 0) return;
 
             int frameMs = _renderFps <= 30 ? 33 : 16;
             if (_renderTimer.ElapsedMilliseconds < frameMs) return;
@@ -1385,19 +1493,22 @@ namespace SoundVibe
                 if (_vinylRotation.Angle >= 360.0) _vinylRotation.Angle -= 360.0;
             }
 
-            int copied = AudioEngine.Instance.CopyFftData(_fftScratch);
+            int copied = _systemAudioMode ? _systemCapture.CopyFftData(_fftScratch) : AudioEngine.Instance.CopyFftData(_fftScratch);
             if (copied <= 0) return;
 
-            BuildLogFrequencyBands(_fftScratch, copied, AudioEngine.Instance.SampleRate, _logFft);
+            int sampleRate = _systemAudioMode ? _systemCapture.SampleRate : AudioEngine.Instance.SampleRate;
+            BuildLogFrequencyBands(_fftScratch, copied, sampleRate, _logFft);
             for (int i = 0; i < NUM_BARS; i++)
             {
                 // Faster attack, slower release: punchy transients without jitter.
-                float target = _logFft[i];
-                float factor = target > smoothedFft[i] ? 0.42f : 0.18f;
+                float target = Math.Min(4f, _logFft[i] * (float)_visSensitivity);
+                float factor = target > smoothedFft[i]
+                    ? (float)(0.70 - _visSmoothing * 0.52)
+                    : (float)(0.36 - _visSmoothing * 0.30);
                 smoothedFft[i] += (target - smoothedFft[i]) * factor;
             }
 
-            double bass = ComputeFrequencyEnergy(_fftScratch, copied, AudioEngine.Instance.SampleRate, 35, 180);
+            double bass = ComputeFrequencyEnergy(_fftScratch, copied, sampleRate, 35, 180) * _visBass;
 
             if (_bgAmbientGlow != null)
             {
@@ -1419,32 +1530,20 @@ namespace SoundVibe
             if (_visualPhase > Math.PI * 2048) _visualPhase -= Math.PI * 2048;
 
             int visMode = CmbVisualizerMode?.SelectedIndex ?? 0;
-            if (!isMiniPlayer && _mainVisHost != null && _mainVisCanvas != null && visMode != KARAOKE_VISUALIZER_INDEX)
+            if (_fullscreenVis && _fullscreenVisHost != null && visMode != KARAOKE_VISUALIZER_INDEX)
+            {
+                double fw = FullscreenVisualizerCanvas.ActualWidth;
+                double fh = FullscreenVisualizerCanvas.ActualHeight;
+                if (fw > 0 && fh > 0)
+                    DrawActiveVisualizer(_fullscreenVisHost, smoothedFft, fw, fh, visMode, bass);
+            }
+            else if (!isMiniPlayer && _mainVisHost != null && _mainVisCanvas != null && visMode != KARAOKE_VISUALIZER_INDEX)
             {
                 double h = _mainVisCanvas.ActualHeight;
                 double w = _mainVisCanvas.ActualWidth;
                 if (w < 1 || h < 1) return;
 
-                switch (visMode)
-                {
-                    case 0: _mainVisHost.DrawBars(smoothedFft, w, h, _visBrush!, mirror: false); break;
-                    case 1: _mainVisHost.DrawCyberWave(smoothedFft, w, h, _visBrush!, _wavePen!); break;
-                    case 2: _mainVisHost.DrawClassicWave(smoothedFft, w, h, _wavePen!); break;
-                    case 3: _mainVisHost.DrawBars(smoothedFft, w, h, _visBrush!, mirror: true); break;
-                    case 4: _mainVisHost.DrawClassicCircular(smoothedFft, w, h, _wavePen!, bass, _circularRotationAngle); break;
-                    case 5: _mainVisHost.DrawSmoothedBlocks(smoothedFft, w, h, _visBrush!); break;
-                    case 6: _mainVisHost.DrawFractureBars(smoothedFft, w, h, _visBrush!, bass); break;
-                    case 7: _mainVisHost.DrawLiquidWave(smoothedFft, w, h, _wavePen!); break;
-                    case 8: _mainVisHost.DrawOrbitalGalaxy(smoothedFft, w, h, _wavePen!, bass); break;
-                    case 9: _mainVisHost.DrawAudioTunnel(smoothedFft, w, h, _wavePen!, bass); break;
-                    case 10: _mainVisHost.DrawParticleReactor(smoothedFft, w, h, _visBrush!, bass, _lastFrameDelta); break;
-                    case 11: _mainVisHost.DrawampCRT(smoothedFft, w, h, _visBrush!); break;
-                    case 12: _mainVisHost.DrawSynthwaveHorizon(smoothedFft, w, h, _visBrush!, _wavePen!, bass); break;
-                    case 13: _mainVisHost.DrawAeroAurora(smoothedFft, w, h, _visBrush!, _wavePen!, bass, _visualPhase); break;
-                    case 14: _mainVisHost.DrawPulseRings(smoothedFft, w, h, _wavePen!, bass, _circularRotationAngle); break;
-                    case 15: _mainVisHost.DrawNeonDna(smoothedFft, w, h, _wavePen!, _visualPhase); break;
-                    case 16: _mainVisHost.DrawSpectrumMountains(smoothedFft, w, h, _wavePen!); break;
-                }
+                DrawActiveVisualizer(_mainVisHost, smoothedFft, w, h, visMode, bass);
             }
             else if (isMiniPlayer && _miniVisHost != null && _miniVisCanvas != null)
             {
@@ -1455,6 +1554,30 @@ namespace SoundVibe
                 for (int i = 0; i < MINI_BARS; i++)
                     _miniFft[i] = smoothedFft[i * 2];
                 _miniVisHost.DrawMiniBars(_miniFft, mw, mh, _miniVisBrush!);
+            }
+        }
+
+        private void DrawActiveVisualizer(VisualizerHost host, float[] data, double w, double h, int visMode, double bass)
+        {
+            switch (visMode)
+            {
+                case 0: host.DrawBars(data, w, h, _visBrush!); break;
+                case 1: host.DrawCyberWave(data, w, h, _visBrush!, _wavePen!); break;
+                case 2: host.DrawClassicWave(data, w, h, _wavePen!); break;
+                case 3: host.DrawBars(data, w, h, _visBrush!, mirror: true); break;
+                case 4: host.DrawClassicCircular(data, w, h, _wavePen!, bass, _circularRotationAngle); break;
+                case 5: host.DrawSmoothedBlocks(data, w, h, _visBrush!); break;
+                case 6: host.DrawFractureBars(data, w, h, _visBrush!, bass); break;
+                case 7: host.DrawLiquidWave(data, w, h, _wavePen!); break;
+                case 8: host.DrawOrbitalGalaxy(data, w, h, _wavePen!, bass); break;
+                case 9: host.DrawAudioTunnel(data, w, h, _wavePen!, bass); break;
+                case 10: host.DrawParticleReactor(data, w, h, _visBrush!, bass, _lastFrameDelta); break;
+                case 11: host.DrawampCRT(data, w, h, _visBrush!); break;
+                case 12: host.DrawSynthwaveHorizon(data, w, h, _visBrush!, _wavePen!, bass); break;
+                case 13: host.DrawAeroAurora(data, w, h, _visBrush!, _wavePen!, bass, _visualPhase); break;
+                case 14: host.DrawPulseRings(data, w, h, _wavePen!, bass, _circularRotationAngle); break;
+                case 15: host.DrawNeonDna(data, w, h, _wavePen!, _visualPhase); break;
+                case 16: host.DrawSpectrumMountains(data, w, h, _wavePen!); break;
             }
         }
 
@@ -1552,6 +1675,16 @@ namespace SoundVibe
         private void SetFakeAmbientGlow(Color dominant)
         {
             if (_bgColorRect == null) return;
+            if (_bgAmbientGlow != null)
+            {
+                var glow = new RadialGradientBrush(Color.FromArgb(155, dominant.R, dominant.G, dominant.B), Colors.Transparent)
+                {
+                    RadiusX = 0.65, RadiusY = 0.7,
+                    Center = new Point(0.65, 0.47), GradientOrigin = new Point(0.65, 0.47)
+                };
+                glow.Freeze();
+                _bgAmbientGlow.Background = glow;
+            }
             RadialGradientBrush brush;
             switch (_currentTheme)
             {
@@ -1577,7 +1710,7 @@ namespace SoundVibe
 
         private void Window_MouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ChangedButton != MouseButton.Left) return;
+            if (e.ChangedButton != MouseButton.Left || _fullscreenVis) return;
             var src = e.OriginalSource as DependencyObject;
             while (src != null)
             {
@@ -1613,6 +1746,8 @@ namespace SoundVibe
                 view.SortDescriptions.Add(new SortDescription(nameof(SongModel.LastPlayedUtc), ListSortDirection.Descending));
             else if (active == "Most Played")
                 view.SortDescriptions.Add(new SortDescription(nameof(SongModel.PlayCount), ListSortDirection.Descending));
+            else
+                view.SortDescriptions.Add(new SortDescription(nameof(SongModel.Title), ListSortDirection.Ascending));
 
             view.Filter = item =>
             {
@@ -1626,6 +1761,9 @@ namespace SoundVibe
                 if (active == "Favorites") return song.IsFavorite;
                 if (active == "Recently Played") return song.LastPlayedUtc.HasValue;
                 if (active == "Most Played") return song.PlayCount > 0;
+                if (active == "Unplayed") return song.PlayCount == 0;
+                if (active == "Recently Added") return song.LastModifiedUtc >= DateTime.UtcNow.AddDays(-30);
+                if (active == "Possible Duplicates") return _duplicateFilePaths.Contains(song.FilePath);
                 if (active != "All Songs")
                 {
                     return _state.Playlists.TryGetValue(active, out var paths) &&
@@ -1634,6 +1772,8 @@ namespace SoundVibe
                 return true;
             };
             view.Refresh();
+            // The playback queue follows the currently visible view rather than always using All Songs.
+            PlaybackManager.Instance.UpdateQueue(view.Cast<SongModel>().ToList());
         }
 
         private void RefreshLibraryViews()
@@ -1644,6 +1784,9 @@ namespace SoundVibe
             _libraryViews.Add("Favorites");
             _libraryViews.Add("Recently Played");
             _libraryViews.Add("Most Played");
+            _libraryViews.Add("Unplayed");
+            _libraryViews.Add("Recently Added");
+            _libraryViews.Add("Possible Duplicates");
             foreach (string name in _state.Playlists.Keys.OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase))
                 _libraryViews.Add(name);
 
@@ -1661,6 +1804,158 @@ namespace SoundVibe
             }
         }
 
+        private void MenuDuplicates_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            _duplicateFilePaths.Clear();
+            foreach (var group in Playlist.GroupBy(s => (s.Title.Trim().ToLowerInvariant(), s.Artist.Trim().ToLowerInvariant())))
+                if (group.Count() > 1) foreach (var song in group) _duplicateFilePaths.Add(song.FilePath);
+            _activeLibraryView = "Possible Duplicates";
+            CmbLibraryView.SelectedItem = _activeLibraryView;
+            ApplyLibraryFilter();
+            MessageBox.Show($"{_duplicateFilePaths.Count} possible duplicates (title + artist). Files were not changed.", "SoundVibe");
+        }
+
+        private void MenuExportM3u_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            var view = CollectionViewSource.GetDefaultView(Playlist).Cast<SongModel>().ToList();
+            if (view.Count == 0) { MessageBox.Show("No songs in this view.", "SoundVibe"); return; }
+            using var dlg = new System.Windows.Forms.SaveFileDialog { Filter = "M3U8 playlist|*.m3u8|M3U playlist|*.m3u", FileName = "SoundVibe-playlist.m3u8" };
+            if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+            try
+            {
+                var lines = new List<string> { "#EXTM3U" };
+                foreach (var song in view)
+                {
+                    lines.Add($"#EXTINF:-1,{song.Artist} - {song.Title}");
+                    lines.Add(song.FilePath);
+                }
+                System.IO.File.WriteAllLines(dlg.FileName, lines, new System.Text.UTF8Encoding(false));
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Export error"); }
+        }
+
+        private void MenuImportM3u_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            using var dlg = new System.Windows.Forms.OpenFileDialog { Filter = "M3U playlist|*.m3u;*.m3u8" };
+            if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+            try
+            {
+                var paths = System.IO.File.ReadAllLines(dlg.FileName)
+                    .Select(x => x.Trim()).Where(x => x.Length > 0 && !x.StartsWith("#") && !Uri.IsWellFormedUriString(x, UriKind.Absolute))
+                    .Select(x => Path.IsPathRooted(x) ? x : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(dlg.FileName)!, x)))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                var known = new HashSet<string>(Playlist.Select(s => s.FilePath), StringComparer.OrdinalIgnoreCase);
+                var matching = paths.Where(known.Contains).ToList();
+                string name = Path.GetFileNameWithoutExtension(dlg.FileName);
+                if (string.IsNullOrWhiteSpace(name)) name = "Imported";
+                if (_libraryViews.Contains(name) && !_state.Playlists.ContainsKey(name)) name += " (Imported)";
+                _state.Playlists[name] = matching;
+                _activeLibraryView = name;
+                RefreshLibraryViews();
+                ApplyLibraryFilter();
+                SavePersistentState();
+                MessageBox.Show($"Imported {matching.Count} / {paths.Count} tracks already in your SoundVibe library. Add missing music folders to include more.", "SoundVibe");
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Import error"); }
+        }
+
+        // Frutiger/Aero styled edit window; playback and LRC parsing remain unchanged.
+        private void MenuEditLyrics_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            var song = PlaybackManager.Instance.CurrentSong;
+            if (song == null) { MessageBox.Show("Play a song first.", "SoundVibe"); return; }
+            string path = Path.ChangeExtension(song.FilePath, ".lrc");
+            var (dlg, content) = CreateSoundVibeDialog("LYRICS EDITOR", song.Title, 670, 540);
+            var layout = new DockPanel();
+            var instruction = new TextBlock
+            {
+                Text = "Use [mm:ss.xx] Lyric text  •  Saved beside the song as an .LRC file",
+                Foreground = new SolidColorBrush(Color.FromRgb(178, 180, 205)),
+                FontSize = 12, Margin = new Thickness(0, 0, 0, 12), TextWrapping = TextWrapping.Wrap
+            };
+            DockPanel.SetDock(instruction, Dock.Top);
+            layout.Children.Add(instruction);
+
+            var footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
+            var save = CreateSoundVibeButton("SAVE LYRICS", true);
+            save.IsDefault = true;
+            var cancel = CreateSoundVibeButton("CANCEL", false);
+            cancel.IsCancel = true;
+            cancel.Margin = new Thickness(10, 0, 0, 0);
+            footer.Children.Add(save);
+            footer.Children.Add(cancel);
+            DockPanel.SetDock(footer, Dock.Bottom);
+            layout.Children.Add(footer);
+
+            var editor = CreateSoundVibeTextBox();
+            editor.AcceptsReturn = true;
+            editor.AcceptsTab = true;
+            editor.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            editor.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            editor.TextWrapping = TextWrapping.NoWrap;
+            editor.FontFamily = new FontFamily("Consolas");
+            editor.FontSize = 13;
+            editor.Padding = new Thickness(14);
+            try { if (System.IO.File.Exists(path)) editor.Text = System.IO.File.ReadAllText(path); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "SoundVibe"); return; }
+            layout.Children.Add(editor);
+            cancel.Click += (s, args) => dlg.DialogResult = false;
+            save.Click += (s, args) =>
+            {
+                try
+                {
+                    System.IO.File.WriteAllText(path, editor.Text, new System.Text.UTF8Encoding(false));
+                    LyricEngine.Instance.LoadLyrics(song.FilePath);
+                    dlg.DialogResult = true;
+                }
+                catch (Exception ex) { MessageBox.Show(ex.Message, "Could not save LRC"); }
+            };
+            content.Child = layout;
+            dlg.Loaded += (s, args) => editor.Focus();
+            dlg.ShowDialog();
+        }
+
+        private void MenuAudioOutput_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            try
+            {
+                int count = WaveOut.DeviceCount;
+                var options = new List<string> { "Windows default output" };
+                for (int i = 0; i < count; i++) options.Add(WaveOut.GetCapabilities(i).ProductName);
+                int selected = PromptForChoice("AUDIO OUTPUT", "Select an output device for local playback.", options);
+                if (selected < 0) return;
+                var engine = AudioEngine.Instance;
+                string? currentPath = PlaybackManager.Instance.CurrentSong?.FilePath;
+                bool hadTrack = engine.HasTrack;
+                bool playing = engine.IsPlaying;
+                TimeSpan time = engine.CurrentTime;
+                engine.OutputDeviceNumber = selected - 1;
+                if (hadTrack && !string.IsNullOrEmpty(currentPath))
+                {
+                    engine.Play(currentPath, (float)(SldVolume.Value / 100));
+                    engine.Seek(time);
+                    if (!playing) engine.Pause();
+                    if (playing) StartRendering();
+                }
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Audio output", MessageBoxButton.OK, MessageBoxImage.Warning); }
+        }
+
+        private void MenuManageFolders_Click(object sender, RoutedEventArgs e)
+        {
+            LibraryToolsPopup.IsOpen = false;
+            if (_libraryFolders.Count == 0) { MessageBox.Show("No music folders yet.", "SoundVibe"); return; }
+            int index = PromptForChoice("MUSIC FOLDERS", "Select a folder to remove from SoundVibe. Your files will NOT be deleted.", _libraryFolders.ToList());
+            if (index < 0) return;
+            _libraryFolders.RemoveAt(index);
+            _ = ReloadAllFoldersAsync();
+        }
+
         private void BtnNewPlaylist_Click(object sender, RoutedEventArgs e)
         {
             string? name = PromptForText("New Playlist", "Playlist name:");
@@ -1669,7 +1964,10 @@ namespace SoundVibe
             if (name.Equals("All Songs", StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("Favorites", StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("Recently Played", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Most Played", StringComparison.OrdinalIgnoreCase))
+                name.Equals("Most Played", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Unplayed", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Recently Added", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("Possible Duplicates", StringComparison.OrdinalIgnoreCase))
             {
                 MessageBox.Show("Bu isim SoundVibe tarafından ayrılmış.", "SoundVibe", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
@@ -1723,36 +2021,186 @@ namespace SoundVibe
             RefreshLibraryViews();
         }
 
-        private string? PromptForText(string title, string prompt)
+        // Theme-aware modal UI: keeps occasional dialogs consistent with SoundVibe.
+        private (Window dialog, Border content) CreateSoundVibeDialog(string title, string subtitle, double width, double height)
         {
+            Color accent = _themeDefs[Math.Max(0, Math.Min(_themeDefs.Length - 1, _currentTheme))].accent;
             var dialog = new Window
             {
-                Title = title,
-                Width = 360,
-                Height = 150,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Owner = this,
-                ResizeMode = ResizeMode.NoResize,
-                Background = new SolidColorBrush(Color.FromRgb(18, 18, 22)),
-                Foreground = Brushes.White,
-                WindowStyle = WindowStyle.ToolWindow
+                Title = "SoundVibe — " + title,
+                Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Width = width, Height = height, ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None, AllowsTransparency = true,
+                Background = Brushes.Transparent, ResizeMode = ResizeMode.NoResize,
+                Foreground = Brushes.White, FontFamily = new FontFamily("Segoe UI")
             };
-            var grid = new Grid { Margin = new Thickness(14) };
+
+            var card = new Border
+            {
+                CornerRadius = new CornerRadius(17), BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(155, accent.R, accent.G, accent.B)),
+                Background = new LinearGradientBrush(Color.FromRgb(27, 18, 43), Color.FromRgb(10, 16, 31), 115),
+                Margin = new Thickness(13), ClipToBounds = true
+            };
+            card.Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = Colors.Black, BlurRadius = 25, ShadowDepth = 5, Opacity = 0.70
+            };
+            var grid = new Grid();
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var label = new TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 8) };
-            var box = new TextBox { Height = 28, Padding = new Thickness(6, 2, 6, 2) };
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
-            var ok = new Button { Content = "OK", Width = 70, Height = 28, IsDefault = true, Margin = new Thickness(0, 0, 6, 0) };
-            var cancel = new Button { Content = "Cancel", Width = 70, Height = 28, IsCancel = true };
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            var header = new Border { Padding = new Thickness(20, 15, 13, 15),
+                Background = new SolidColorBrush(Color.FromArgb(25, accent.R, accent.G, accent.B)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(45, 255, 255, 255)), BorderThickness = new Thickness(0, 0, 0, 1) };
+            var titleRow = new Grid();
+            titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var titleStack = new StackPanel();
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = "◈  " + title, FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Brushes.White
+            });
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = subtitle, FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(173, 181, 210)),
+                Margin = new Thickness(0, 3, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis
+            });
+            titleRow.Children.Add(titleStack);
+            var close = CreateSoundVibeButton("✕", false);
+            close.Width = 35; close.Height = 31; close.Padding = new Thickness(0);
+            close.Click += (s, e) => dialog.DialogResult = false;
+            Grid.SetColumn(close, 1);
+            titleRow.Children.Add(close);
+            header.Child = titleRow;
+            header.MouseLeftButtonDown += (s, e) =>
+            {
+                if (e.ChangedButton == MouseButton.Left && e.OriginalSource is not Button)
+                {
+                    try { dialog.DragMove(); } catch (InvalidOperationException) { }
+                }
+            };
+            grid.Children.Add(header);
+            var body = new Border { Padding = new Thickness(20, 17, 20, 20) };
+            Grid.SetRow(body, 1);
+            grid.Children.Add(body);
+            card.Child = grid;
+            dialog.Content = card;
+            return (dialog, body);
+        }
+
+        private Button CreateSoundVibeButton(string label, bool primary)
+        {
+            Color accent = _themeDefs[Math.Max(0, Math.Min(_themeDefs.Length - 1, _currentTheme))].accent;
+            var button = new Button
+            {
+                Content = label, Height = 36, MinWidth = 86, Padding = new Thickness(17, 0, 17, 0),
+                FontSize = 12, FontWeight = FontWeights.SemiBold, Cursor = Cursors.Hand,
+                Foreground = Brushes.White, BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(primary ? accent : Color.FromArgb(55, 255, 255, 255)),
+                Background = new SolidColorBrush(primary ? accent : Color.FromArgb(30, 255, 255, 255))
+            };
+            var style = new Style(typeof(Button));
+            var template = new ControlTemplate(typeof(Button));
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
+            border.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent) });
+            border.SetBinding(Border.BorderBrushProperty, new Binding("BorderBrush") { RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent) });
+            border.SetBinding(Border.BorderThicknessProperty, new Binding("BorderThickness") { RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent) });
+            var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+            presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+            border.AppendChild(presenter);
+            template.VisualTree = border;
+            style.Setters.Add(new Setter(Button.TemplateProperty, template));
+            var hover = new Trigger { Property = Button.IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(Button.BackgroundProperty,
+                new SolidColorBrush(primary
+                    ? Color.FromRgb((byte)Math.Min(255, accent.R + 18), (byte)Math.Min(255, accent.G + 18), (byte)Math.Min(255, accent.B + 18))
+                    : Color.FromArgb(53, 255, 255, 255))));
+            style.Triggers.Add(hover);
+            button.Style = style;
+            return button;
+        }
+
+        private TextBox CreateSoundVibeTextBox()
+        {
+            Color accent = _themeDefs[Math.Max(0, Math.Min(_themeDefs.Length - 1, _currentTheme))].accent;
+            return new TextBox
+            {
+                Background = new SolidColorBrush(Color.FromRgb(31, 28, 51)),
+                Foreground = Brushes.White, CaretBrush = Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromArgb(105, accent.R, accent.G, accent.B)),
+                BorderThickness = new Thickness(1), Padding = new Thickness(12, 8, 12, 8), FontSize = 13
+            };
+        }
+
+        private string? PromptForText(string title, string prompt, double dialogHeight = 150)
+        {
+            var (dialog, body) = CreateSoundVibeDialog(title.ToUpperInvariant(), "SOUNDVIBE LIBRARY", 420,
+                Math.Max(245, Math.Min(680, dialogHeight + 110)));
+            var layout = new Grid();
+            layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var description = new TextBlock
+            {
+                Text = prompt, TextWrapping = TextWrapping.Wrap, FontSize = 12,
+                Foreground = new SolidColorBrush(Color.FromRgb(205, 205, 222))
+            };
+            var descriptionScroll = new ScrollViewer { Content = description, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Margin = new Thickness(0, 0, 0, 12) };
+            layout.Children.Add(descriptionScroll);
+            var box = CreateSoundVibeTextBox();
+            box.Height = 38;
+            Grid.SetRow(box, 1); layout.Children.Add(box);
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 16, 0, 0) };
+            var ok = CreateSoundVibeButton("OK", true); ok.IsDefault = true;
+            var cancel = CreateSoundVibeButton("CANCEL", false); cancel.IsCancel = true;
+            cancel.Margin = new Thickness(10, 0, 0, 0);
             ok.Click += (s, e) => dialog.DialogResult = true;
+            cancel.Click += (s, e) => dialog.DialogResult = false;
             buttons.Children.Add(ok); buttons.Children.Add(cancel);
-            Grid.SetRow(box, 1); Grid.SetRow(buttons, 2);
-            grid.Children.Add(label); grid.Children.Add(box); grid.Children.Add(buttons);
-            dialog.Content = grid;
+            Grid.SetRow(buttons, 2); layout.Children.Add(buttons);
+            body.Child = layout;
             dialog.Loaded += (s, e) => { box.Focus(); Keyboard.Focus(box); };
             return dialog.ShowDialog() == true ? box.Text : null;
+        }
+
+        private int PromptForChoice(string title, string description, IReadOnlyList<string> options)
+        {
+            var (dialog, body) = CreateSoundVibeDialog(title, "SOUNDVIBE LIBRARY", 480,
+                Math.Max(270, Math.Min(625, 170 + options.Count * 43)));
+            int selected = -1;
+            var layout = new DockPanel();
+            var desc = new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(Color.FromRgb(195, 198, 223)), FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 12) };
+            DockPanel.SetDock(desc, Dock.Top); layout.Children.Add(desc);
+            var cancel = CreateSoundVibeButton("CANCEL", false);
+            cancel.HorizontalAlignment = HorizontalAlignment.Right;
+            cancel.Margin = new Thickness(0, 13, 0, 0);
+            cancel.IsCancel = true;
+            cancel.Click += (s, e) => dialog.DialogResult = false;
+            DockPanel.SetDock(cancel, Dock.Bottom); layout.Children.Add(cancel);
+            var list = new StackPanel();
+            for (int i = 0; i < options.Count; i++)
+            {
+                int index = i;
+                var choice = CreateSoundVibeButton(options[i], false);
+                choice.Content = new TextBlock { Text = options[i], TextTrimming = TextTrimming.CharacterEllipsis };
+                choice.HorizontalContentAlignment = HorizontalAlignment.Left;
+                choice.HorizontalAlignment = HorizontalAlignment.Stretch;
+                choice.Margin = new Thickness(0, 0, 0, 6);
+                choice.Click += (s, e) => { selected = index; dialog.DialogResult = true; };
+                list.Children.Add(choice);
+            }
+            var scroll = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            layout.Children.Add(scroll);
+            body.Child = layout;
+            return dialog.ShowDialog() == true ? selected : -1;
         }
 
         private void MenuPlayNext_Click(object sender, RoutedEventArgs e)
@@ -1762,6 +2210,25 @@ namespace SoundVibe
         private void MenuAddQueue_Click(object sender, RoutedEventArgs e)
         {
             if (sender is MenuItem m && m.DataContext is SongModel s) PlaybackManager.Instance.AddLastQueue(s);
+        }
+
+        private void QueueMoveUp_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button b && b.DataContext is SongModel song)
+            {
+                int index = PlaybackManager.Instance.UserQueue.IndexOf(song);
+                if (index > 0) PlaybackManager.Instance.UserQueue.Move(index, index - 1);
+            }
+        }
+
+        private void QueueMoveDown_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button b && b.DataContext is SongModel song)
+            {
+                int index = PlaybackManager.Instance.UserQueue.IndexOf(song);
+                if (index >= 0 && index < PlaybackManager.Instance.UserQueue.Count - 1)
+                    PlaybackManager.Instance.UserQueue.Move(index, index + 1);
+            }
         }
 
         private void QueueRemove_Click(object sender, RoutedEventArgs e)
@@ -1837,7 +2304,7 @@ namespace SoundVibe
             Activate();
             Topmost = true;
             Topmost = isMiniPlayer;
-            if (AudioEngine.Instance.IsPlaying) StartRendering();
+            if (CanVisualize) StartRendering();
         }
 
         private const int WM_APPCOMMAND = 0x0319;
@@ -1981,7 +2448,7 @@ namespace SoundVibe
                 _libraryCache[song.FilePath] = new LibraryCacheEntry
                 {
                     FilePath = song.FilePath,
-                    LastWriteUtcTicks = System.IO.File.GetLastWriteTimeUtc(song.FilePath).Ticks,
+                    LastWriteUtcTicks = song.LastModifiedUtc.Ticks == 0 ? System.IO.File.GetLastWriteTimeUtc(song.FilePath).Ticks : song.LastModifiedUtc.Ticks,
                     Title = song.Title,
                     Artist = song.Artist,
                     Bitrate = song.Bitrate,
@@ -1997,37 +2464,62 @@ namespace SoundVibe
             catch { return false; }
         }
 
-        private void SetupLibraryWatcher(string path)
+        private void SetupLibraryWatchers()
         {
             DisposeLibraryWatcher();
-            try
+            foreach (string root in _libraryFolders)
             {
-                _libraryWatcher = new FileSystemWatcher(path)
+                try
                 {
-                    IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
-                    EnableRaisingEvents = true
-                };
-                _libraryWatcher.Created += LibraryWatcher_Created;
-                _libraryWatcher.Deleted += LibraryWatcher_Deleted;
-                _libraryWatcher.Renamed += LibraryWatcher_Renamed;
+                    var watcher = new FileSystemWatcher(root)
+                    {
+                        IncludeSubdirectories = true,
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite
+                    };
+                    watcher.Created += LibraryWatcher_Created;
+                    watcher.Deleted += LibraryWatcher_Deleted;
+                    watcher.Renamed += LibraryWatcher_Renamed;
+                    watcher.EnableRaisingEvents = true;
+                    _libraryWatchers.Add(watcher);
+                }
+                catch { /* The remaining folders can still be watched. */ }
             }
-            catch { DisposeLibraryWatcher(); }
         }
 
         private void DisposeLibraryWatcher()
         {
-            if (_libraryWatcher == null) return;
-            try
+            foreach (var watcher in _libraryWatchers)
             {
-                _libraryWatcher.EnableRaisingEvents = false;
-                _libraryWatcher.Created -= LibraryWatcher_Created;
-                _libraryWatcher.Deleted -= LibraryWatcher_Deleted;
-                _libraryWatcher.Renamed -= LibraryWatcher_Renamed;
-                _libraryWatcher.Dispose();
+                try
+                {
+                    watcher.EnableRaisingEvents = false;
+                    watcher.Created -= LibraryWatcher_Created;
+                    watcher.Deleted -= LibraryWatcher_Deleted;
+                    watcher.Renamed -= LibraryWatcher_Renamed;
+                    watcher.Dispose();
+                }
+                catch { }
             }
-            catch { }
-            _libraryWatcher = null;
+            _libraryWatchers.Clear();
+        }
+
+        private static IEnumerable<string> EnumerateAudioFilesSafely(IEnumerable<string> roots)
+        {
+            var pending = new Stack<string>(roots.Where(Directory.Exists));
+            while (pending.Count != 0)
+            {
+                string dir = pending.Pop();
+                string[] folders;
+                string[] files;
+                try { folders = Directory.GetDirectories(dir); files = Directory.GetFiles(dir); }
+                catch { continue; }
+                foreach (string f in files) if (AudioExtensions.Contains(Path.GetExtension(f))) yield return f;
+                foreach (string child in folders)
+                {
+                    try { if ((System.IO.File.GetAttributes(child) & FileAttributes.ReparsePoint) == 0) pending.Push(child); }
+                    catch { }
+                }
+            }
         }
 
         private async void LibraryWatcher_Created(object sender, FileSystemEventArgs e)
@@ -2043,7 +2535,6 @@ namespace SoundVibe
                 ApplySongState(song);
                 Playlist.Add(song);
                 UpdateCacheEntry(song);
-                PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
                 SaveLibraryCache();
                 ApplyLibraryFilter();
             });
@@ -2057,9 +2548,32 @@ namespace SoundVibe
 
         private async void LibraryWatcher_Renamed(object sender, RenamedEventArgs e)
         {
-            await Dispatcher.InvokeAsync(() => RemoveLibraryPath(e.OldFullPath));
-            if (AudioExtensions.Contains(Path.GetExtension(e.FullPath)))
-                LibraryWatcher_Created(sender, new FileSystemEventArgs(WatcherChangeTypes.Created, Path.GetDirectoryName(e.FullPath) ?? "", Path.GetFileName(e.FullPath)));
+            if (_isClosing) return;
+            if (!AudioExtensions.Contains(Path.GetExtension(e.FullPath)))
+            {
+                await Dispatcher.InvokeAsync(() => RemoveLibraryPath(e.OldFullPath));
+                return;
+            }
+            // Keep favorite/play count/playlist entries across a file rename.
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_state.Songs.Remove(e.OldFullPath, out var oldState)) _state.Songs[e.FullPath] = oldState;
+                if (_libraryCache.Remove(e.OldFullPath, out var oldCache))
+                {
+                    oldCache.FilePath = e.FullPath;
+                    _libraryCache[e.FullPath] = oldCache;
+                }
+                foreach (var list in _state.Playlists.Values)
+                    for (int i = 0; i < list.Count; i++)
+                        if (string.Equals(list[i], e.OldFullPath, StringComparison.OrdinalIgnoreCase)) list[i] = e.FullPath;
+                if (string.Equals(_resumePath, e.OldFullPath, StringComparison.OrdinalIgnoreCase)) _resumePath = e.FullPath;
+                var existing = Playlist.FirstOrDefault(x => string.Equals(x.FilePath, e.OldFullPath, StringComparison.OrdinalIgnoreCase));
+                if (existing != null) Playlist.Remove(existing);
+                PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+                SavePersistentState();
+            });
+            LibraryWatcher_Created(sender, new FileSystemEventArgs(WatcherChangeTypes.Created,
+                Path.GetDirectoryName(e.FullPath) ?? "", Path.GetFileName(e.FullPath)));
         }
 
         private void RemoveLibraryPath(string path)
@@ -2071,20 +2585,20 @@ namespace SoundVibe
             foreach (var list in _state.Playlists.Values)
                 list.RemoveAll(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase));
             PlaybackManager.Instance.RemoveFromUserQueueByPath(path);
-            PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
+            ApplyLibraryFilter();
             SaveLibraryCache();
             SavePersistentState();
         }
 
-        private async void BtnResumeLast_Click(object sender, RoutedEventArgs e)
+        private void BtnResumeLast_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrWhiteSpace(_resumePath)) return;
             var song = Playlist.FirstOrDefault(x => string.Equals(x.FilePath, _resumePath, StringComparison.OrdinalIgnoreCase));
             if (song == null) return;
             PlaybackManager.Instance.SetCurrentSong(song);
             PlayCurrentSong();
-            await Task.Delay(100);
-            AudioEngine.Instance.Seek(TimeSpan.FromSeconds(Math.Min(_resumeSeconds, Math.Max(0, AudioEngine.Instance.TotalTime.TotalSeconds - 1))));
+            if (AudioEngine.Instance.HasTrack)
+                AudioEngine.Instance.Seek(TimeSpan.FromSeconds(Math.Min(_resumeSeconds, Math.Max(0, AudioEngine.Instance.TotalTime.TotalSeconds - 1))));
             BtnResumeLast.Visibility = Visibility.Collapsed;
         }
 
@@ -2129,10 +2643,16 @@ namespace SoundVibe
             await LoadFolderAsync(dlg.SelectedPath);
         }
 
-        // --- GÜNCELLENEN: YÜKLEME KODUNU DIŞARI ALDIK (OTOMATİK YÜKLEME İÇİN) ---
         private async Task LoadFolderAsync(string path)
         {
             if (!Directory.Exists(path)) return;
+            if (!_libraryFolders.Contains(path, StringComparer.OrdinalIgnoreCase)) _libraryFolders.Add(path);
+            await ReloadAllFoldersAsync();
+        }
+
+        private async Task ReloadAllFoldersAsync()
+        {
+            _libraryFolders.RemoveAll(f => !Directory.Exists(f));
 
             _libraryLoadCts?.Cancel();
             _libraryLoadCts?.Dispose();
@@ -2151,8 +2671,7 @@ namespace SoundVibe
                     IEnumerable<string> files;
                     try
                     {
-                        files = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
-                            .Where(f => AudioExtensions.Contains(Path.GetExtension(f)))
+                        files = EnumerateAudioFilesSafely(_libraryFolders)
                             .Distinct(StringComparer.OrdinalIgnoreCase)
                             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
                             .ToArray();
@@ -2198,8 +2717,8 @@ namespace SoundVibe
                 TxtSearch.Text = "";
                 _pendingSearch = "";
                 PlaybackManager.Instance.UpdateQueue(Playlist.ToList());
-                _lastFolderPath = path;
-                SetupLibraryWatcher(path);
+                _lastFolderPath = _libraryFolders.LastOrDefault() ?? "";
+                SetupLibraryWatchers();
                 SaveLibraryCache();
                 ApplyLibraryFilter();
                 UpdateResumeButton();
@@ -2210,11 +2729,8 @@ namespace SoundVibe
             catch (OperationCanceledException) { }
             finally
             {
-                if (!token.IsCancellationRequested)
-                {
-                    BtnAddFolder.Content = "📁 Add Folder";
-                    BtnAddFolder.IsEnabled = true;
-                }
+                BtnAddFolder.Content = "📁 Add Folder";
+                BtnAddFolder.IsEnabled = true;
             }
         }
 
@@ -2277,7 +2793,7 @@ namespace SoundVibe
             {
                 AudioEngine.Instance.Pause();
                 UpdatePlayButtons(false);
-                StopRendering();
+                if (!_systemAudioMode) StopRendering();
                 return;
             }
 
@@ -2422,6 +2938,8 @@ namespace SoundVibe
         private void UpdateUI(SongModel song, Color dominantColor)
         {
             if (_txtNowPlayingTitle != null) _txtNowPlayingTitle.Text = song.Title;
+            TxtFullscreenTitle.Text = song.Title;
+            TxtFullscreenArtist.Text = song.Artist;
             if (_txtMiniTitle != null) _txtMiniTitle.Text = song.Title;
             if (_txtNowPlayingArtist != null) _txtNowPlayingArtist.Text = song.Artist;
             if (_txtMiniArtist != null) _txtMiniArtist.Text = song.Artist;
@@ -2459,6 +2977,10 @@ namespace SoundVibe
         public double LastPositionSeconds { get; set; } = 0;
         public string LastLibraryView { get; set; } = "All Songs";
         public int VisualizerModeIndex { get; set; } = 10;
+        public List<string> LibraryFolders { get; set; } = new();
+        public double VisSensitivity { get; set; } = 1.0;
+        public double VisSmoothing { get; set; } = 0.5;
+        public double VisBass { get; set; } = 1.0;
     }
 
     public sealed class SoundVibeState
@@ -2583,19 +3105,18 @@ namespace SoundVibe
         {
             var targetList = IsShuffle ? _shuffledQueue : _originalQueue;
             _currentIndex = targetList.IndexOf(song);
-            if (_currentIndex < 0 && IsShuffle && _originalQueue.Contains(song))
+            if (_currentIndex < 0)
             {
-                _shuffledQueue.Insert(0, song);
-                _currentIndex = 0;
+                if (!_originalQueue.Contains(song)) _originalQueue.Add(song);
+                targetList = IsShuffle ? _shuffledQueue : _originalQueue;
+                if (!targetList.Contains(song)) targetList.Add(song);
+                _currentIndex = targetList.IndexOf(song);
             }
         }
 
-        public bool GoToNext()
+        public bool GoToNext(bool naturalEnd = false)
         {
             var targetList = IsShuffle ? _shuffledQueue : _originalQueue;
-            if (targetList.Count == 0) return false;
-            if (IsRepeat) return CurrentSong != null;
-
             if (UserQueue.Count > 0)
             {
                 var next = UserQueue[0];
@@ -2604,6 +3125,8 @@ namespace SoundVibe
                 return CurrentSong != null;
             }
 
+            if (targetList.Count == 0) return false;
+            if (naturalEnd && IsRepeat) return CurrentSong != null;
             _currentIndex++;
             if (_currentIndex >= targetList.Count)
             {
@@ -2644,6 +3167,7 @@ namespace SoundVibe
         public string FilePath { get; set; } = "";
         public int Bitrate { get; set; }
         public int SampleRate { get; set; }
+        public DateTime LastModifiedUtc { get; set; }
 
         public BitmapImage? CoverImage
         {
@@ -2702,7 +3226,8 @@ namespace SoundVibe
                     Title = string.IsNullOrWhiteSpace(tagFile.Tag.Title) ? Path.GetFileNameWithoutExtension(path) : tagFile.Tag.Title,
                     Artist = string.IsNullOrWhiteSpace(string.Join(", ", tagFile.Tag.Performers)) ? "Bilinmeyen Sanatçı" : string.Join(", ", tagFile.Tag.Performers),
                     Bitrate = tagFile.Properties.AudioBitrate != 0 ? tagFile.Properties.AudioBitrate : ((tagFile.Properties.AudioSampleRate * 16 * Math.Max(1, tagFile.Properties.AudioChannels)) / 1000),
-                    SampleRate = tagFile.Properties.AudioSampleRate
+                    SampleRate = tagFile.Properties.AudioSampleRate,
+                    LastModifiedUtc = System.IO.File.GetLastWriteTimeUtc(path)
                 };
 
                 if (tagFile.Tag.Pictures.Length >= 1)
@@ -2723,7 +3248,8 @@ namespace SoundVibe
                 Title = string.IsNullOrWhiteSpace(cache.Title) ? Path.GetFileNameWithoutExtension(cache.FilePath) : cache.Title,
                 Artist = string.IsNullOrWhiteSpace(cache.Artist) ? "Bilinmeyen Sanatçı" : cache.Artist,
                 Bitrate = cache.Bitrate,
-                SampleRate = cache.SampleRate
+                SampleRate = cache.SampleRate,
+                LastModifiedUtc = new DateTime(cache.LastWriteUtcTicks, DateTimeKind.Utc)
             };
         }
 
@@ -2757,6 +3283,91 @@ namespace SoundVibe
     }
     #endregion
 
+    // Non-invasive visualizer input; does not change the existing playback or EQ chain.
+    public sealed class SystemAudioCapture : IDisposable
+    {
+        private WasapiLoopbackCapture? _capture;
+        private readonly object _sync = new();
+        private const int FftLength = 2048;
+        private readonly Complex[] _samples = new Complex[FftLength];
+        private readonly float[] _spectrum = new float[FftLength / 2];
+        private int _position;
+        public bool IsActive => _capture != null;
+        public int SampleRate { get; private set; } = 48000;
+
+        public void Start()
+        {
+            if (_capture != null) return;
+            var capture = new WasapiLoopbackCapture();
+            SampleRate = capture.WaveFormat.SampleRate;
+            capture.DataAvailable += OnDataAvailable;
+            capture.RecordingStopped += (_, _) => { /* Stop is controlled by the main window. */ };
+            try { capture.StartRecording(); _capture = capture; }
+            catch { capture.DataAvailable -= OnDataAvailable; capture.Dispose(); throw; }
+        }
+
+        private void OnDataAvailable(object? sender, WaveInEventArgs e)
+        {
+            var fmt = _capture?.WaveFormat;
+            if (fmt == null) return;
+            int ch = Math.Max(1, fmt.Channels);
+            int bytes = fmt.BitsPerSample / 8;
+            if (bytes <= 0 || fmt.BlockAlign <= 0) return;
+            lock (_sync)
+            {
+                for (int offset = 0; offset + fmt.BlockAlign <= e.BytesRecorded; offset += fmt.BlockAlign)
+                {
+                    float mono = 0;
+                    for (int channel = 0; channel < ch; channel++)
+                    {
+                        int i = offset + channel * bytes;
+                        float s = 0;
+                        if ((fmt.Encoding == WaveFormatEncoding.IeeeFloat || fmt.Encoding == WaveFormatEncoding.Extensible) && bytes == 4)
+                            s = BitConverter.ToSingle(e.Buffer, i);
+                        else if ((fmt.Encoding == WaveFormatEncoding.Pcm || fmt.Encoding == WaveFormatEncoding.Extensible) && bytes == 2)
+                            s = BitConverter.ToInt16(e.Buffer, i) / 32768f;
+                        else if (fmt.Encoding == WaveFormatEncoding.Pcm && bytes == 4)
+                            s = BitConverter.ToInt32(e.Buffer, i) / 2147483648f;
+                        mono += s;
+                    }
+                    mono /= ch;
+                    double window = 0.54 - 0.46 * Math.Cos(2 * Math.PI * _position / (FftLength - 1));
+                    _samples[_position].X = (float)(mono * window);
+                    _samples[_position].Y = 0;
+                    if (++_position >= FftLength)
+                    {
+                        FastFourierTransform.FFT(true, 11, _samples);
+                        for (int j = 0; j < _spectrum.Length; j++)
+                            _spectrum[j] = (float)Math.Sqrt(_samples[j].X * _samples[j].X + _samples[j].Y * _samples[j].Y);
+                        _position = 0;
+                    }
+                }
+            }
+        }
+
+        public int CopyFftData(float[] destination)
+        {
+            lock (_sync)
+            {
+                int n = Math.Min(destination.Length, _spectrum.Length);
+                Array.Copy(_spectrum, destination, n);
+                return n;
+            }
+        }
+
+        public void Stop()
+        {
+            var cap = _capture;
+            _capture = null;
+            if (cap == null) return;
+            try { cap.StopRecording(); } catch { }
+            cap.DataAvailable -= OnDataAvailable;
+            cap.Dispose();
+            lock (_sync) { Array.Clear(_spectrum, 0, _spectrum.Length); _position = 0; }
+        }
+        public void Dispose() => Stop();
+    }
+
     #region [ 4. AUDIO ENGINE & EQUALIZER ]
 
     public class EqualizerProvider : ISampleProvider
@@ -2777,7 +3388,7 @@ namespace SoundVibe
             {
                 for (int b = 0; b < _frequencies.Length; b++)
                 {
-                    _filters[c, b] = BiQuadFilter.PeakingEQ(source.WaveFormat.SampleRate, _frequencies[b], 1.0f, 0f);
+                    _filters[c, b] = BiQuadFilter.PeakingEQ(source.WaveFormat.SampleRate, Math.Min(_frequencies[b], source.WaveFormat.SampleRate * 0.45f), 1.0f, 0f);
                 }
             }
         }
@@ -2788,7 +3399,7 @@ namespace SoundVibe
             _gains[bandIndex] = gainDb;
             for (int c = 0; c < WaveFormat.Channels; c++)
             {
-                _filters[c, bandIndex].SetPeakingEq(WaveFormat.SampleRate, _frequencies[bandIndex], 1.0f, gainDb);
+                _filters[c, bandIndex].SetPeakingEq(WaveFormat.SampleRate, Math.Min(_frequencies[bandIndex], WaveFormat.SampleRate * 0.45f), 1.0f, gainDb);
             }
         }
 
@@ -2822,6 +3433,7 @@ namespace SoundVibe
         private AudioAnalyzer? analyzer;
         private EqualizerProvider? equalizer;
         private float[] currentEqGains = new float[10];
+        public int OutputDeviceNumber { get; set; } = -1;
 
         public bool IsPlaying => outputDevice?.PlaybackState == PlaybackState.Playing;
         public bool HasTrack => audioFile != null && outputDevice != null;
@@ -2843,7 +3455,7 @@ namespace SoundVibe
                 equalizer = new EqualizerProvider(analyzer);
                 for (int i = 0; i < 10; i++) equalizer.UpdateGain(i, currentEqGains[i]);
 
-                outputDevice = new WaveOutEvent();
+                outputDevice = new WaveOutEvent { DeviceNumber = OutputDeviceNumber };
                 outputDevice.PlaybackStopped += OnPlaybackStopped;
                 outputDevice.Init(equalizer);
                 outputDevice.Volume = volume;
@@ -2981,6 +3593,11 @@ namespace SoundVibe
         public static LyricEngine Instance { get; } = new LyricEngine();
         private List<KeyValuePair<TimeSpan, string>> _syncLyrics = new();
         private string _staticLyrics = "";
+
+        public bool HasSynchronizedLyrics => _syncLyrics.Count > 0;
+
+        public bool HasPlainLyrics => !string.IsNullOrWhiteSpace(_staticLyrics);
+
         public int OffsetMilliseconds { get; set; } = 200;
 
         private LyricEngine() { }
@@ -3016,6 +3633,53 @@ namespace SoundVibe
             }
             catch { }
         }
+
+        public void LoadFromText(string? syncedLyrics, string? plainLyrics)
+        {
+            _syncLyrics.Clear();
+            _staticLyrics = plainLyrics ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(syncedLyrics))
+                return;
+
+            string[] formats =
+            {
+        @"mm\:ss\.ff",
+        @"m\:ss\.ff",
+        @"mm\:ss\.fff",
+        @"m\:ss\.fff",
+        @"mm\:ss"
+    };
+
+            foreach (string rawLine in syncedLyrics.Split('\n'))
+            {
+                string line = rawLine.Trim();
+
+                if (!line.StartsWith("["))
+                    continue;
+
+                int end = line.IndexOf(']');
+                if (end < 2)
+                    continue;
+
+                string timestamp = line.Substring(1, end - 1);
+                string lyric = line.Substring(end + 1).Trim();
+
+                if (TimeSpan.TryParseExact(
+                    timestamp,
+                    formats,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.TimeSpanStyles.None,
+                    out TimeSpan time))
+                {
+                    _syncLyrics.Add(
+                        new KeyValuePair<TimeSpan, string>(time, lyric));
+                }
+            }
+
+            _syncLyrics.Sort((a, b) => a.Key.CompareTo(b.Key));
+        }
+
 
         public string GetCurrentLyric(TimeSpan t)
         {
